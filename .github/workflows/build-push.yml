@@ -1,0 +1,24 @@
+name: "Build and Push Docker GCP"
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+  issues: write
+  packages: write
+  id-token: write
+  
+jobs:
+  build-push-gcp:
+    uses: gouv-nc-data/github-workflows/.github/workflows/build-push-on-gcp.yml@main
+    secrets:
+      GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+      

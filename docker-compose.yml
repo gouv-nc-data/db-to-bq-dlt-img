@@ -1,0 +1,13 @@
+services:
+  db-to-bq:
+    build: .
+    container_name: db-to-bq-test
+    env_file:
+      - .env
+    volumes:
+      - ./creds.json:/app/creds.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/creds.json
+    # Mode interactif pour voir les logs dlt en temps réel
+    stdin_open: true
+    tty: true
