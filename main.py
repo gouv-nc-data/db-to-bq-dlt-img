@@ -7,6 +7,8 @@ from google.cloud.logging.handlers import StructuredLogHandler
 from dotenv import load_dotenv
 import oracledb
 
+from google.cloud import secretmanager
+
 load_dotenv()
 
 # Configuration Cloud Logging
@@ -32,8 +34,13 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
         sys.exit(1)
 
 def run_pipeline():
+    # Configuration BDD
+    secret_url = os.environ.get("PG_URL_SECRET")
+    client = secretmanager.SecretManagerServiceClient()
+    response = client.access_secret_version(request={"name": secret_url})
+    db_url = response.payload.data.decode("UTF-8")
+
     # Configuration des variables d'environnement
-    db_url = os.getenv("DB_URL", "").strip()
     db_schema = os.getenv("DB_SCHEMA", "").strip() or None
     bq_dataset_id = os.getenv("BQ_DATASET_ID", "").strip()
     bq_project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
