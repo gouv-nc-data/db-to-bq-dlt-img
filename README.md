@@ -10,7 +10,7 @@ L'image se configure via des variables d'environnement.
 
 | Variable | Description |
 | --- | --- |
-| `DB_URL` | URL de connexion à la base de données au format SQLAlchemy (peut être injectée via un secret Terraform). |
+| `DB_URL_SECRET` | Nom du secret contenant l'url de connexion |
 | `BQ_DATASET_ID` | Nom du dataset BigQuery de destination. |
 
 ### Variables optionnelles

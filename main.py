@@ -35,7 +35,7 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
 
 def run_pipeline():
     # Configuration BDD
-    secret_url = os.environ.get("PG_URL_SECRET")
+    secret_url = os.environ.get("DB_URL_SECRET")
     client = secretmanager.SecretManagerServiceClient()
     response = client.access_secret_version(request={"name": secret_url})
     db_url = response.payload.data.decode("UTF-8")
@@ -65,6 +65,7 @@ def run_pipeline():
         pipeline_name='db_to_bq_generic',
         destination=dlt.destinations.bigquery(**destination_params, loader_file_format="parquet"),
         dataset_name=bq_dataset_id,
+        progress="log",
     )
 
     # Chargement de la source SQL Database
