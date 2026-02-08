@@ -13,4 +13,5 @@ dependencies = [
     "pandas>=2.0.0",
     "pyarrow>=14.0.0",
     "google-cloud-secret-manager>=2.26.0",
+    "psutil>=7.2.2",
 ]
