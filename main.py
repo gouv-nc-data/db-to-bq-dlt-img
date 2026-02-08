@@ -98,6 +98,7 @@ def run_pipeline():
 
     # Exécution
     try:
+        logging.info("Exécution de la pipeline...")
         load_info = pipeline.run(source, write_disposition="replace")
         logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
     except Exception as e:
