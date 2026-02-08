@@ -70,7 +70,8 @@ def run_pipeline():
 
     # Chargement de la source SQL Database
     # sql_database permet de charger automatiquement toutes les tables d'un schéma
-    source = sql_database(db_url, schema=db_schema)
+    chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))  # Par défaut 100000
+    source = sql_database(db_url, schema=db_schema, chunk_size=chunk_size)
 
     # --- LOGIQUE DE FILTRAGE CONSOLIDÉE ---
     all_resources = list(source.resources.keys())
