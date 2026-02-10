@@ -6,5 +6,5 @@ credentials.json
 .python-version
 uv.lock
 
-creds.json
+*.json
 *.code-workspace

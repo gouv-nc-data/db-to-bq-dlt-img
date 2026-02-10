@@ -38,7 +38,14 @@ def run_pipeline():
     secret_url = os.environ.get("DB_URL_SECRET")
     client = secretmanager.SecretManagerServiceClient()
     response = client.access_secret_version(request={"name": secret_url})
-    db_url = response.payload.data.decode("UTF-8")
+    db_url = response.payload.data.decode("UTF-8").strip()
+    
+    # Injection automatique de disable_oob=true pour le mode Oracle Thin
+    # Cela évite les lenteurs/blocages liés au "Out of Band" breaks, fréquents dans Docker/K8s
+    if "oracle" in db_url and "disable_oob=true" not in db_url and os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() != "true":
+        separator = "&" if "?" in db_url else "?"
+        db_url = f"{db_url}{separator}disable_oob=true"
+        logging.info("Paramètre disable_oob=true ajouté à la chaîne de connexion (Mode Thin).")
 
     # Configuration des variables d'environnement
     db_schema = os.getenv("DB_SCHEMA", "").strip() or None

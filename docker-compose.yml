@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./creds.json:/app/creds.json:ro
+      - ./prj-davar-p-bq-a01c-1b6c1d59b2b7.json:/app/creds.json:ro
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/creds.json
     # Mode interactif pour voir les logs dlt en temps réel
