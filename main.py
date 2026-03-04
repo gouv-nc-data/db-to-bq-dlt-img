@@ -7,6 +7,7 @@ from dlt.sources.sql_database import sql_database
 from google.cloud.logging.handlers import StructuredLogHandler
 from dotenv import load_dotenv
 import oracledb
+from datetime import datetime, date
 
 from google.cloud import secretmanager
 
@@ -36,6 +37,32 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
     except Exception as e:
         logging.error(f"Erreur lors de l'activation du mode Oracle Thick: {e}")
         sys.exit(1)
+
+def _truncate_to_partition(val, grain):
+    """Tronque une date ou un timestamp au grain (month/year) pour le partitionnement BigQuery."""
+    if not val:
+        return None
+    
+    # Tentative de conversion si c'est un string ISO
+    if isinstance(val, str):
+        try:
+            # On ne garde que la partie date YYYY-MM-DD
+            val = date.fromisoformat(val[:10])
+        except (ValueError, TypeError):
+            # Fallback manipulation de string simple
+            if grain == "year":
+                return val[:4] + "-01-01"
+            if grain == "month":
+                return val[:7] + "-01"
+            return val
+
+    if isinstance(val, (datetime, date)):
+        if grain == "year":
+            return date(val.year, 1, 1)
+        if grain == "month":
+            return date(val.year, val.month, 1)
+    
+    return val
 
 def run_pipeline():
     # Configuration BDD
@@ -133,9 +160,36 @@ def run_pipeline():
         pk_col = config.get("primary_key") or global_primary_key
         w_disp = config.get("write_disposition") or global_write_disposition
         partition_col = config.get("partition")
+        partition_grain = config.get("partition_grain") # month or year
         exclude_cols = config.get("exclude")
         
         hints = {}
+
+        # --- Transformation pour le partitionnement custom (Month/Year) ---
+        if partition_col and partition_grain in ["month", "year"]:
+            v_partition_col = "_dlt_partition"
+            
+            # Ajout de la transformation
+            def add_partition_col(item, p_col=partition_col, grain=partition_grain):
+                item[v_partition_col] = _truncate_to_partition(item.get(p_col), grain)
+                return item
+            
+            res.add_map(add_partition_col)
+            
+            # On partitionne sur la colonne virtuelle
+            hints["partition"] = v_partition_col
+            logging.info(f"Partitionnement {partition_grain} activé pour {res_name} sur la colonne virtuelle {v_partition_col} (source: {partition_col})")
+            
+            # Optimisation BigQuery : PK composite
+            if pk_col and w_disp == "merge":
+                if isinstance(pk_col, str):
+                    pk_col = [pk_col, v_partition_col]
+                elif isinstance(pk_col, list) and v_partition_col not in pk_col:
+                    pk_col.append(v_partition_col)
+                logging.info(f"PK augmentée pour {res_name} pour optimisation Merge: {pk_col}")
+        elif partition_col:
+            hints["partition"] = partition_col
+
         if inc_col:
             hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing="include")
         if pk_col:
