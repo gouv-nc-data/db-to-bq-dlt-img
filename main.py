@@ -147,10 +147,10 @@ def run_pipeline():
         if exclude_cols:
             if isinstance(exclude_cols, str):
                 exclude_cols = [exclude_cols]
-            # Pour exclure des colonnes d'une ressource, on utilise apply_hints avec columns.
-            # On met include_column: False pour chaque colonne à exclure.
-            res.apply_hints(columns={c: {"include_column": False} for c in exclude_cols})
-            logging.info(f"Colonnes exclues pour {res_name} : {exclude_cols}")
+            # La méthode la plus robuste pour exclure des colonnes est de les supprimer physiquement
+            # de chaque item de donnée via add_map.
+            res.add_map(lambda item: {k: v for k, v in item.items() if k not in exclude_cols})
+            logging.info(f"Colonnes exclues physiquement pour {res_name} : {exclude_cols}")
 
         # Partitionnement BigQuery
         if partition_col:
