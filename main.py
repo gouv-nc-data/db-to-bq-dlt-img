@@ -137,7 +137,7 @@ def run_pipeline():
         
         hints = {}
         if inc_col:
-            hints["incremental"] = dlt.sources.incremental(inc_col)
+            hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing="include")
         if pk_col:
             hints["primary_key"] = pk_col
         if w_disp:
