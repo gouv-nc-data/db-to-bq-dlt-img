@@ -133,6 +133,7 @@ def run_pipeline():
         pk_col = config.get("primary_key") or global_primary_key
         w_disp = config.get("write_disposition") or global_write_disposition
         partition_col = config.get("partition")
+        exclude_cols = config.get("exclude")
         
         hints = {}
         if inc_col:
@@ -142,6 +143,15 @@ def run_pipeline():
         if w_disp:
             hints["write_disposition"] = w_disp
         
+        # Exclusion de colonnes (ex: bytea volumineux)
+        if exclude_cols:
+            if isinstance(exclude_cols, str):
+                exclude_cols = [exclude_cols]
+            # dlt utilise select() avec un préfixe "-" pour exclure une colonne.
+            # ATTENTION : select() renvoie une NOUVELLE ressource, il faut donc réassigner la variable.
+            res = res.select(*[f"-{c}" for c in exclude_cols])
+            logging.info(f"Colonnes exclues pour {res_name} : {exclude_cols}")
+
         # Partitionnement BigQuery
         if partition_col:
             res.apply_hints(columns={partition_col: {"partition": True}})
