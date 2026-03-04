@@ -8,6 +8,7 @@ from google.cloud.logging.handlers import StructuredLogHandler
 from dotenv import load_dotenv
 import oracledb
 from datetime import datetime, date
+from dlt.destinations.adapters import bigquery_adapter
 
 from google.cloud import secretmanager
 
@@ -213,8 +214,19 @@ def run_pipeline():
             logging.info(f"Partitionnement activé pour {res_name} sur la colonne {partition_col}")
 
         if hints:
-            res.apply_hints(**hints)
-            logging.info(f"Configuration appliquée pour {res_name}: {hints}")
+            # On utilise bigquery_adapter pour appliquer les hints BQ de manière robuste
+            # car certains arguments comme 'partition' ne sont pas directs dans apply_hints
+            bq_hints = {}
+            if "partition" in hints:
+                bq_hints["partition"] = hints.pop("partition")
+            
+            if bq_hints:
+                bigquery_adapter(res, **bq_hints)
+                logging.info(f"Hints BigQuery appliqués pour {res_name}: {bq_hints}")
+            
+            if hints:
+                res.apply_hints(**hints)
+                logging.info(f"Autres hints appliqués pour {res_name}: {hints}")
 
     logging.info(f"Ressources prêtes pour le transfert : {selected}")
 
