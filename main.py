@@ -147,9 +147,9 @@ def run_pipeline():
         if exclude_cols:
             if isinstance(exclude_cols, str):
                 exclude_cols = [exclude_cols]
-            # dlt utilise select() avec un préfixe "-" pour exclure une colonne.
-            # ATTENTION : select() renvoie une NOUVELLE ressource, il faut donc réassigner la variable.
-            res = res.select(*[f"-{c}" for c in exclude_cols])
+            # Pour exclure des colonnes d'une ressource, on utilise apply_hints avec columns.
+            # On met include_column: False pour chaque colonne à exclure.
+            res.apply_hints(columns={c: {"include_column": False} for c in exclude_cols})
             logging.info(f"Colonnes exclues pour {res_name} : {exclude_cols}")
 
         # Partitionnement BigQuery
