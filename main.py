@@ -72,6 +72,7 @@ def run_pipeline():
         pipeline_name='db_to_bq_generic',
         destination=dlt.destinations.bigquery(**destination_params, loader_file_format="parquet"),
         dataset_name=bq_dataset_id,
+        staging='filesystem'
         progress="log",
     )
 
