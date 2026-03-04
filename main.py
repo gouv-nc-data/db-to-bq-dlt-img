@@ -147,10 +147,11 @@ def run_pipeline():
         if exclude_cols:
             if isinstance(exclude_cols, str):
                 exclude_cols = [exclude_cols]
-            # La méthode la plus robuste pour exclure des colonnes est de les supprimer physiquement
-            # de chaque item de donnée via add_map.
-            res.add_map(lambda item: {k: v for k, v in item.items() if k not in exclude_cols})
-            logging.info(f"Colonnes exclues physiquement pour {res_name} : {exclude_cols}")
+            
+            # On s'assure que exclude_cols est traité comme une liste pour l'IDE (Pyre2)
+            cols_to_skip = list(exclude_cols)
+            res.add_map(lambda item: {k: v for k, v in item.items() if k not in cols_to_skip})
+            logging.info(f"Colonnes exclues physiquement pour {res_name} : {cols_to_skip}")
 
         # Partitionnement BigQuery
         if partition_col:
