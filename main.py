@@ -89,10 +89,17 @@ def run_pipeline():
     if bq_project_id:
         destination_params["project_id"] = bq_project_id
 
+    # Staging GCS optionnel : accélère le chargement si un bucket est configuré
+    bucket_url = os.getenv("BUCKET_URL")
+    staging = 'filesystem' if bucket_url else None
+    if bucket_url:
+        logging.info(f"Staging GCS activé : {bucket_url}")
+
     pipeline = dlt.pipeline(
         pipeline_name='db_to_bq_generic',
         destination=dlt.destinations.bigquery(**destination_params, loader_file_format="parquet"),
         dataset_name=bq_dataset_id,
+        staging=staging,
         progress="log",
     )
 
