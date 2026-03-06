@@ -23,6 +23,7 @@ Vous pouvez configurer un comportement global ou spécifique par table pour n'ex
 | `INCREMENTAL_COLUMN` | Colonne de curseur globale (ex: `updated_at`) pour l'incrémental. | (vide) |
 | `PRIMARY_KEY` | Clé primaire globale (requis pour le mode `merge`). | (vide) |
 | `TABLE_CONFIGS` | JSON de configuration spécifique par table (voir exemple ci-dessous). | `{}` |
+| `TABLES_EXCLUDE_COLUMNS` | (Non implémenté globalement, utilisez `TABLE_CONFIGS`) | - |
 | `NORMALIZE_START_METHOD`| Méthode de démarrage des workers (`spawn` ou `fork`). | `spawn` |
 
 #### Format de `TABLE_CONFIGS`
@@ -40,9 +41,15 @@ Cette variable permet de définir des règles précises pour chaque table (insen
   "AUTRE_TABLE": {
     "write_disposition": "append",
     "incremental": "id"
+  },
+  "DOCUMENT": {
+    "exclude": ["content"]
   }
 }
 ```
+
+> [!TIP]
+> **Exclusion de colonnes** : Idéal pour les champs `bytea` ou `blob` (pièces jointes) qui alourdissent inutilement le transfert vers BigQuery.
 
 > [!TIP]
 > **Partitionnement** : Utiliser la même colonne (ex: `date_maj`) pour `incremental` et `partition` est la configuration optimale pour réduire les coûts sur BigQuery.

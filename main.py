@@ -4,6 +4,7 @@ import logging
 import json
 import dlt
 from dlt.sources.sql_database import sql_database
+from dlt.destinations.adapters import bigquery_adapter
 from google.cloud.logging.handlers import StructuredLogHandler
 from dotenv import load_dotenv
 import oracledb
@@ -133,6 +134,7 @@ def run_pipeline():
         pk_col = config.get("primary_key") or global_primary_key
         w_disp = config.get("write_disposition") or global_write_disposition
         partition_col = config.get("partition")
+        cluster_cols = config.get("cluster")
         exclude_cols = config.get("exclude")
         
         hints = {}
@@ -153,10 +155,18 @@ def run_pipeline():
             res.add_map(lambda item: {k: v for k, v in item.items() if k not in cols_to_skip})
             logging.info(f"Colonnes exclues physiquement pour {res_name} : {cols_to_skip}")
 
-        # Partitionnement BigQuery
+        # Partitionnement et clustering BigQuery via l'adapter dédié
+        # Cela empêche l'auto-partitionnement de DLT et donne un contrôle explicite
+        adapter_kwargs = {}
         if partition_col:
-            res.apply_hints(columns={partition_col: {"partition": True}})
-            logging.info(f"Partitionnement activé pour {res_name} sur la colonne {partition_col}")
+            adapter_kwargs["partition"] = partition_col
+        if cluster_cols:
+            if isinstance(cluster_cols, str):
+                cluster_cols = [cluster_cols]
+            adapter_kwargs["cluster"] = list(cluster_cols)
+        if adapter_kwargs:
+            bigquery_adapter(res, **adapter_kwargs)
+            logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")
 
         if hints:
             res.apply_hints(**hints)
