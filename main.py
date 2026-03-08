@@ -95,8 +95,9 @@ def run_pipeline():
     if bucket_url:
         logging.info(f"Staging GCS activé : {bucket_url}")
 
-    # Nom du pipeline (unique par flux pour éviter les collisions d'état dans BigQuery)
-    pipeline_id = os.getenv("PIPELINE_NAME", "db_to_bq_generic")
+    # Nom du pipeline : auto-généré à partir du dataset pour isolation, ou via variable d'environnement
+    default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
+    pipeline_id = os.getenv("PIPELINE_NAME", default_pipeline_name)
 
     pipeline = dlt.pipeline(
         pipeline_name=pipeline_id,
