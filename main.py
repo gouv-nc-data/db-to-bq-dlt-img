@@ -95,8 +95,11 @@ def run_pipeline():
     if bucket_url:
         logging.info(f"Staging GCS activé : {bucket_url}")
 
+    # Nom du pipeline (unique par flux pour éviter les collisions d'état dans BigQuery)
+    pipeline_id = os.getenv("PIPELINE_NAME", "db_to_bq_generic")
+
     pipeline = dlt.pipeline(
-        pipeline_name='db_to_bq_generic',
+        pipeline_name=pipeline_id,
         destination=dlt.destinations.bigquery(**destination_params, loader_file_format="parquet"),
         dataset_name=bq_dataset_id,
         staging=staging,
@@ -184,8 +187,9 @@ def run_pipeline():
     # Exécution
     try:
         logging.info("Exécution de la pipeline...")
-        # On passe global_write_disposition comme défaut (sera écrasé par les hints si spécifié)
-        load_info = pipeline.run(source, write_disposition=global_write_disposition)
+        # On ne passe plus write_disposition globalement à run() car cela réinitialise l'état incrémental.
+        # Le mode par défaut (replace) est déjà appliqué individuellement à chaque ressource via les hints (ligne 142/153).
+        load_info = pipeline.run(source)
         logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
     except Exception as e:
         logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)
