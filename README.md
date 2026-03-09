@@ -23,6 +23,7 @@ Vous pouvez configurer un comportement global ou spécifique par table pour n'ex
 | `INCREMENTAL_COLUMN` | Colonne de curseur globale (ex: `updated_at`) pour l'incrémental. | (vide) |
 | `PRIMARY_KEY` | Clé primaire globale (requis pour le mode `merge`). | (vide) |
 | `TABLE_CONFIGS` | JSON de configuration spécifique par table (voir exemple ci-dessous). | `{}` |
+| `ON_CURSOR_VALUE_MISSING` | Comportement si la valeur d'incrément (`updated`) est `NULL` (`include`, `exclude`, `raise`). | `include` |
 | `TABLES_EXCLUDE_COLUMNS` | (Non implémenté globalement, utilisez `TABLE_CONFIGS`) | - |
 | `NORMALIZE_START_METHOD`| Méthode de démarrage des workers (`spawn` ou `fork`). | `spawn` |
 
@@ -43,7 +44,11 @@ Cette variable permet de définir des règles précises pour chaque table (insen
     "incremental": "id"
   },
   "DOCUMENT": {
-    "exclude": ["content"]
+    "exclude": ["content"],
+    "incremental": "updated",
+    "primary_key": "id",
+    "write_disposition": "merge",
+    "on_cursor_value_missing": "exclude"
   }
 }
 ```

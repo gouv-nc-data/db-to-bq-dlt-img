@@ -66,7 +66,9 @@ def run_pipeline():
     # Nouvelles configurations pour l'incrémental et le mode hybride
     global_incremental_col = os.getenv("INCREMENTAL_COLUMN")
     global_primary_key = os.getenv("PRIMARY_KEY")
-    global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace") # Par défaut replace pour garder le comportement d'origine
+    global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace")
+    global_cursor_missing = os.getenv("ON_CURSOR_VALUE_MISSING", "include")
+
 
     # Configuration spécifique par table (JSON)
     table_configs_raw = os.getenv("TABLE_CONFIGS", "{}")
@@ -147,10 +149,13 @@ def run_pipeline():
         partition_col = config.get("partition")
         cluster_cols = config.get("cluster")
         exclude_cols = config.get("exclude")
+        cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
+
         
         hints = {}
         if inc_col:
-            hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing="include")
+            hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing=cursor_missing)
+
         if pk_col:
             hints["primary_key"] = pk_col
         if w_disp:
