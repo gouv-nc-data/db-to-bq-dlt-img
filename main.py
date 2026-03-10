@@ -137,18 +137,30 @@ def run_pipeline():
 
     source = source.with_resources(*selected)
     
+    # Utilisation du normaliseur natif du pipeline pour s'adapter à la destination (ex: BigQuery)
+    naming = pipeline.default_schema.naming
+
+    def normalize_col(col):
+        if not col:
+            return col
+        if isinstance(col, str):
+            return naming.normalize_identifier(col)
+        if isinstance(col, list):
+            return [naming.normalize_identifier(c) for c in col]
+        return col
+
     # --- APPLICATION DES CONFIGURATIONS SPÉCIFIQUES (Incrémental, PK, Partitionnement) ---
     for res_name in selected:
         res = source.resources[res_name]
         # Recherche de config spécifique (insensible à la casse)
         config = table_configs.get(res_name.lower()) or {}
         
-        inc_col = config.get("incremental") or global_incremental_col
-        pk_col = config.get("primary_key") or global_primary_key
+        inc_col = normalize_col(config.get("incremental") or global_incremental_col)
+        pk_col = normalize_col(config.get("primary_key") or global_primary_key)
         w_disp = config.get("write_disposition") or global_write_disposition
-        partition_col = config.get("partition")
-        cluster_cols = config.get("cluster")
-        exclude_cols = config.get("exclude")
+        partition_col = normalize_col(config.get("partition"))
+        cluster_cols = normalize_col(config.get("cluster"))
+        exclude_cols = normalize_col(config.get("exclude"))
         cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
 
         
