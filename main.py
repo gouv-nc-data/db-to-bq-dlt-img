@@ -137,8 +137,8 @@ def run_pipeline():
 
     source = source.with_resources(*selected)
     
-    # Utilisation du normaliseur natif du pipeline pour s'adapter à la destination (ex: BigQuery)
-    naming = pipeline.default_schema.naming
+    # Utilisation du normaliseur natif de la source (déjà initialisé)
+    naming = source.schema.naming
 
     def normalize_col(col):
         if not col:
