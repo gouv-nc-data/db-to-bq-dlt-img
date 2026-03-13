@@ -1,8 +1,10 @@
 import os
 import sys
 import logging
+import json
 import dlt
 from dlt.sources.sql_database import sql_database
+from dlt.destinations.adapters import bigquery_adapter
 from google.cloud.logging.handlers import StructuredLogHandler
 from dotenv import load_dotenv
 import oracledb
@@ -23,6 +25,9 @@ logging.captureWarnings(True)
 os.environ["RUNTIME__LOG_LEVEL"] = log_level_name
 os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
 
+# Paramètre de normalisation (requis pour éviter les erreurs de fork avec certains pilotes)
+os.environ["NORMALIZE__START_METHOD"] = os.getenv("NORMALIZE_START_METHOD", "spawn")
+
 # Mode Thick Oracle (requis pour les versions < 12.1)
 if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
     lib_dir = os.getenv("ORACLE_IC_PATH")
@@ -36,6 +41,7 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
 def run_pipeline():
     # Configuration BDD
     secret_url = os.environ.get("DB_URL_SECRET")
+
     client = secretmanager.SecretManagerServiceClient()
     response = client.access_secret_version(request={"name": secret_url})
     db_url = response.payload.data.decode("UTF-8").strip()
@@ -53,12 +59,29 @@ def run_pipeline():
     bq_project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
     
     # Inclusion/Exclusion/Préfixe de tables
-    tables_include = os.getenv("TABLES_INCLUDE")
-    tables_exclude = os.getenv("TABLES_EXCLUDE")
-    tables_prefix = os.getenv("TABLES_PREFIX")
+    tables_include = os.getenv("TABLES_INCLUDE") or os.getenv("TABLE_INCLUDE")
+    tables_exclude = os.getenv("TABLES_EXCLUDE") or os.getenv("TABLE_EXCLUDE")
+    tables_prefix = os.getenv("TABLES_PREFIX") or os.getenv("TABLE_PREFIX")
 
-    if not db_url or not bq_dataset_id:
-        logging.error("DB_URL et BQ_DATASET_ID sont requis.")
+    # Nouvelles configurations pour l'incrémental et le mode hybride
+    global_incremental_col = os.getenv("INCREMENTAL_COLUMN")
+    global_primary_key = os.getenv("PRIMARY_KEY")
+    global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace")
+    global_cursor_missing = os.getenv("ON_CURSOR_VALUE_MISSING", "include")
+
+
+    # Configuration spécifique par table (JSON)
+    table_configs_raw = os.getenv("TABLE_CONFIGS", "{}")
+    try:
+        # On normalise les clés en minuscules pour une recherche insensible à la casse
+        raw_configs = json.loads(table_configs_raw)
+        table_configs = {k.lower(): v for k, v in raw_configs.items()}
+    except json.JSONDecodeError as e:
+        logging.error(f"Erreur lors du parsing de TABLE_CONFIGS (format JSON invalide): {e}")
+        table_configs = {}
+
+    if not secret_url or not bq_dataset_id:
+        logging.error("DB_URL_SECRET et BQ_DATASET_ID sont requis.")
         sys.exit(1)
 
     logging.info(f"Démarrage de la pipeline vers BigQuery (Dataset: {bq_dataset_id})")
@@ -68,11 +91,21 @@ def run_pipeline():
     if bq_project_id:
         destination_params["project_id"] = bq_project_id
 
+    # Staging GCS optionnel : accélère le chargement si un bucket est configuré
+    bucket_url = os.getenv("BUCKET_URL")
+    staging = 'filesystem' if bucket_url else None
+    if bucket_url:
+        logging.info(f"Staging GCS activé : {bucket_url}")
+
+    # Nom du pipeline : auto-généré à partir du dataset pour isolation, ou via variable d'environnement
+    default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
+    pipeline_id = os.getenv("PIPELINE_NAME", default_pipeline_name)
+
     pipeline = dlt.pipeline(
-        pipeline_name='db_to_bq_generic',
+        pipeline_name=pipeline_id,
         destination=dlt.destinations.bigquery(**destination_params, loader_file_format="parquet"),
         dataset_name=bq_dataset_id,
-        staging='filesystem',
+        staging=staging,
         progress="log",
     )
 
@@ -103,12 +136,78 @@ def run_pipeline():
         return
 
     source = source.with_resources(*selected)
+    
+    # Utilisation du normaliseur natif de la source (déjà initialisé)
+    naming = source.schema.naming
+
+    def normalize_col(col):
+        if not col:
+            return col
+        if isinstance(col, str):
+            return naming.normalize_identifier(col)
+        if isinstance(col, list):
+            return [naming.normalize_identifier(c) for c in col]
+        return col
+
+    # --- APPLICATION DES CONFIGURATIONS SPÉCIFIQUES (Incrémental, PK, Partitionnement) ---
+    for res_name in selected:
+        res = source.resources[res_name]
+        # Recherche de config spécifique (insensible à la casse)
+        config = table_configs.get(res_name.lower()) or {}
+        
+        inc_col = normalize_col(config.get("incremental") or global_incremental_col)
+        pk_col = normalize_col(config.get("primary_key") or global_primary_key)
+        w_disp = config.get("write_disposition") or global_write_disposition
+        partition_col = normalize_col(config.get("partition"))
+        cluster_cols = normalize_col(config.get("cluster"))
+        exclude_cols = normalize_col(config.get("exclude"))
+        cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
+
+        
+        hints = {}
+        if inc_col:
+            hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing=cursor_missing)
+
+        if pk_col:
+            hints["primary_key"] = pk_col
+        if w_disp:
+            hints["write_disposition"] = w_disp
+        
+        # Exclusion de colonnes (ex: bytea volumineux)
+        if exclude_cols:
+            if isinstance(exclude_cols, str):
+                exclude_cols = [exclude_cols]
+            
+            # On s'assure que exclude_cols est traité comme une liste pour l'IDE (Pyre2)
+            cols_to_skip = list(exclude_cols)
+            res.add_map(lambda item: {k: v for k, v in item.items() if k not in cols_to_skip})
+            logging.info(f"Colonnes exclues physiquement pour {res_name} : {cols_to_skip}")
+
+        # Partitionnement et clustering BigQuery via l'adapter dédié
+        # Cela empêche l'auto-partitionnement de DLT et donne un contrôle explicite
+        adapter_kwargs = {}
+        if partition_col:
+            adapter_kwargs["partition"] = partition_col
+        if cluster_cols:
+            if isinstance(cluster_cols, str):
+                cluster_cols = [cluster_cols]
+            adapter_kwargs["cluster"] = list(cluster_cols)
+        if adapter_kwargs:
+            bigquery_adapter(res, **adapter_kwargs)
+            logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")
+
+        if hints:
+            res.apply_hints(**hints)
+            logging.info(f"Configuration appliquée pour {res_name}: {hints}")
+
     logging.info(f"Ressources prêtes pour le transfert : {selected}")
 
     # Exécution
     try:
         logging.info("Exécution de la pipeline...")
-        load_info = pipeline.run(source, write_disposition="replace")
+        # On ne passe plus write_disposition globalement à run() car cela réinitialise l'état incrémental.
+        # Le mode par défaut (replace) est déjà appliqué individuellement à chaque ressource via les hints (ligne 142/153).
+        load_info = pipeline.run(source)
         logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
     except Exception as e:
         logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)

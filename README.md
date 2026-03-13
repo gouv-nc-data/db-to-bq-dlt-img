@@ -13,7 +13,53 @@ L'image se configure via des variables d'environnement.
 | `DB_URL_SECRET` | Nom du secret contenant l'url de connexion |
 | `BQ_DATASET_ID` | Nom du dataset BigQuery de destination. |
 
-### Variables optionnelles
+### Configuration du chargement différentiel (Mode Hybride)
+
+Vous pouvez configurer un comportement global ou spécifique par table pour n'extraire que les nouvelles données.
+
+| Variable | Description | Par défaut |
+|----------|-------------|------------|
+| `WRITE_DISPOSITION` | Mode par défaut : `replace` (écrase), `append` (ajoute), `merge` (met à jour). | `replace` |
+| `INCREMENTAL_COLUMN` | Colonne de curseur globale (ex: `updated_at`) pour l'incrémental. | (vide) |
+| `PRIMARY_KEY` | Clé primaire globale (requis pour le mode `merge`). | (vide) |
+| `TABLE_CONFIGS` | JSON de configuration spécifique par table (voir exemple ci-dessous). | `{}` |
+| `ON_CURSOR_VALUE_MISSING` | Comportement si la valeur d'incrément (`updated`) est `NULL` (`include`, `exclude`, `raise`). | `include` |
+| `TABLES_EXCLUDE_COLUMNS` | (Non implémenté globalement, utilisez `TABLE_CONFIGS`) | - |
+| `NORMALIZE_START_METHOD`| Méthode de démarrage des workers (`spawn` ou `fork`). | `spawn` |
+
+#### Format de `TABLE_CONFIGS`
+
+Cette variable permet de définir des règles précises pour chaque table (insensible à la casse sur les noms de tables).
+
+```json
+{
+  "MA_TABLE": {
+    "incremental": "date_maj",
+    "primary_key": "id",
+    "write_disposition": "merge",
+    "partition": "date_maj"
+  },
+  "AUTRE_TABLE": {
+    "write_disposition": "append",
+    "incremental": "id"
+  },
+  "DOCUMENT": {
+    "exclude": ["content"],
+    "incremental": "updated",
+    "primary_key": "id",
+    "write_disposition": "merge",
+    "on_cursor_value_missing": "exclude"
+  }
+}
+```
+
+> [!TIP]
+> **Exclusion de colonnes** : Idéal pour les champs `bytea` ou `blob` (pièces jointes) qui alourdissent inutilement le transfert vers BigQuery.
+
+> [!TIP]
+> **Partitionnement** : Utiliser la même colonne (ex: `date_maj`) pour `incremental` et `partition` est la configuration optimale pour réduire les coûts sur BigQuery.
+
+### Autres variables optionnelles
 
 | Variable | Description | Défaut |
 | --- | --- | --- |
@@ -23,6 +69,7 @@ L'image se configure via des variables d'environnement.
 | `TABLES_INCLUDE` | Liste de tables à inclure séparées par des virgules (si vide, toutes les tables). | (vide) |
 | `TABLES_EXCLUDE` | Liste de tables à exclure séparées par des virgules. | (vide) |
 | `TABLES_PREFIX` | Préfixe pour filtrer les tables à inclure (ex: `T_`). | (vide) |
+| `SQL_CHUNK_SIZE` | Nombre de lignes par chunk d'extraction | `100000` |
 | `ENABLE_ORACLE_THICK_MODE` | Activer le mode Thick pour Oracle (requis pour DB < 12.1). | `false` |
 | `ORACLE_IC_PATH` | Chemin vers l'Instant Client Oracle (si requis et non dans le PATH). | (vide) |
 | `LOG_LEVEL` | Niveau de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`). | `INFO` |
