@@ -13,17 +13,29 @@ from google.cloud import secretmanager
 
 load_dotenv()
 
-# Configuration Cloud Logging
-handler = StructuredLogHandler()
-logging.getLogger().addHandler(handler)
+# Configuration Logging
+log_format = os.getenv("LOG_FORMAT", "JSON").upper()
 log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_name, logging.INFO)
-logging.getLogger().setLevel(log_level)
-logging.captureWarnings(True)
 
-# Configuration dlt
+if log_format == "JSON":
+    # Configuration Cloud Logging (JSON Structuré)
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    handler = StructuredLogHandler(project=project_id)
+    logging.getLogger().addHandler(handler)
+    os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
+else:
+    # Format texte standard
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stdout
+    )
+    os.environ["RUNTIME__LOG_FORMAT"] = "TEXT"
+
+logging.getLogger().setLevel(log_level)
 os.environ["RUNTIME__LOG_LEVEL"] = log_level_name
-os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
+logging.captureWarnings(True)
 
 # Paramètre de normalisation (requis pour éviter les erreurs de fork avec certains pilotes)
 os.environ["NORMALIZE__START_METHOD"] = os.getenv("NORMALIZE_START_METHOD", "spawn")
