@@ -2,30 +2,27 @@ import os
 import sys
 import logging
 import json
-import dlt
-from dlt.sources.sql_database import sql_database
-from dlt.destinations.adapters import bigquery_adapter
-from google.cloud.logging.handlers import StructuredLogHandler
+import datetime
 from dotenv import load_dotenv
-import oracledb
-
-from google.cloud import secretmanager
 
 load_dotenv()
 
-# Configuration Logging
+# --- CONFIGURATION LOGGING (DOIT ÊTRE FAIT EN PREMIER POUR LE TRACE CLIENT) ---
 log_format = os.getenv("LOG_FORMAT", "JSON").upper()
 log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_name, logging.INFO)
 
 if log_format == "JSON":
-    # Configuration Cloud Logging (JSON Structuré)
-    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    handler = StructuredLogHandler(project=project_id)
-    logging.getLogger().addHandler(handler)
+    try:
+        from google.cloud.logging.handlers import StructuredLogHandler
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        handler = StructuredLogHandler(project=project_id)
+        logging.getLogger().addHandler(handler)
+    except ImportError:
+        logging.basicConfig(level=log_level)
     os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
 else:
-    # Format texte standard
+    # Format texte standard pour environnement local
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -37,10 +34,64 @@ logging.getLogger().setLevel(log_level)
 os.environ["RUNTIME__LOG_LEVEL"] = log_level_name
 logging.captureWarnings(True)
 
+# --- MONKEY PATCH ORACLEDB (EMPECHE LES CRASH SUR DATES INVALIDES) ---
+import oracledb
+
+def date_out_converter(val):
+    """Convertisseur pour les dates Oracle hors intervalle Python (ex: année -5579)"""
+    if val is None:
+        return None
+    try:
+        # On vérifie l'année (4 premiers caractères) avant conversion
+        year_str = val[:4]
+        # Si l'année est négative ou hors intervalle [0001-9999]
+        if year_str.startswith('-') or int(year_str) < 1 or int(year_str) > 9999:
+            logging.error(f"!!! CRITICAL PATCH !!! Date Oracle invalide neutralisée : {val}")
+            return None
+        # On retourne un objet datetime ISO-compatible
+        return datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+    except Exception:
+        return None
+
+def oracle_output_type_handler(cursor, metadata):
+    """Handler global pour intercepter les types temporels et les traiter via date_out_converter"""
+    if metadata.type in (oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_TIMESTAMP, 
+                         oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ):
+        return cursor.var(oracledb.DB_TYPE_VARCHAR, arraysize=cursor.arraysize, outconverter=date_out_converter)
+
+def _apply_patch(conn):
+    """Applique le handler sur une nouvelle connexion"""
+    if hasattr(conn, "outputtypehandler"):
+        conn.outputtypehandler = oracle_output_type_handler
+    return conn
+
+# Patche les points d'entrée de connexion pour garantir l'activation du handler
+_original_connect = oracledb.connect
+def _patched_connect(*args, **kwargs):
+    return _apply_patch(_original_connect(*args, **kwargs))
+oracledb.connect = _patched_connect
+
+if hasattr(oracledb, "Connection"):
+    _original_Connection = oracledb.Connection
+    def _patched_Connection(*args, **kwargs):
+        return _apply_patch(_original_Connection(*args, **kwargs))
+    oracledb.Connection = _patched_Connection
+
+if hasattr(oracledb, "Connect"):
+    oracledb.Connect = _patched_connect
+
+# --- IMPORTS DLT & SQLALCHEMY ---
+import dlt
+from dlt.sources.sql_database import sql_database, sql_table
+from dlt.destinations.adapters import bigquery_adapter
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
+from google.cloud import secretmanager
+
 # Paramètre de normalisation (requis pour éviter les erreurs de fork avec certains pilotes)
 os.environ["NORMALIZE__START_METHOD"] = os.getenv("NORMALIZE_START_METHOD", "spawn")
 
-# Mode Thick Oracle (requis pour les versions < 12.1)
+# Mode Thick Oracle (requis pour les versions < 12.1 ou les types complexes)
 if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
     lib_dir = os.getenv("ORACLE_IC_PATH")
     try:
@@ -49,6 +100,30 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
     except Exception as e:
         logging.error(f"Erreur lors de l'activation du mode Oracle Thick: {e}")
         sys.exit(1)
+
+# Événements SQLAlchemy pour renforcer le réglage de session et le handler
+@event.listens_for(Engine, "connect")
+def set_oracle_params(dbapi_connection, connection_record):
+    """Configuration de la session Oracle et injection du handler de type"""
+    if not hasattr(dbapi_connection, "cursor"):
+         return
+    cursor = dbapi_connection.cursor()
+    try:
+        # Forçage des formats de date en ISO pour le convertisseur
+        cursor.execute("ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'")
+        cursor.execute("ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6'")
+    except Exception:
+        pass
+    finally:
+        cursor.close()
+    
+    _apply_patch(dbapi_connection)
+
+@event.listens_for(Engine, "before_cursor_execute")
+def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    """Force l'installation du handler sur le curseur avant chaque exécution"""
+    if hasattr(cursor, "outputtypehandler"):
+        cursor.outputtypehandler = oracle_output_type_handler
 
 def run_pipeline():
     # Configuration BDD
@@ -81,7 +156,6 @@ def run_pipeline():
     global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace")
     global_cursor_missing = os.getenv("ON_CURSOR_VALUE_MISSING", "include")
 
-
     # Configuration spécifique par table (JSON)
     table_configs_raw = os.getenv("TABLE_CONFIGS", "{}")
     try:
@@ -89,7 +163,7 @@ def run_pipeline():
         raw_configs = json.loads(table_configs_raw)
         table_configs = {k.lower(): v for k, v in raw_configs.items()}
     except json.JSONDecodeError as e:
-        logging.error(f"Erreur lors du parsing de TABLE_CONFIGS (format JSON invalide): {e}")
+        logging.error(f"Erreur lors du parsing de TABLE_CONFIGS: {e}")
         table_configs = {}
 
     if not secret_url or not bq_dataset_id:
@@ -122,26 +196,63 @@ def run_pipeline():
     )
 
     # Chargement de la source SQL Database
-    # sql_database permet de charger automatiquement toutes les tables d'un schéma
-    chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))  # Par défaut 100000
-    source = sql_database(db_url, schema=db_schema, chunk_size=chunk_size)
+    chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
+    source = sql_database(
+        db_url, 
+        schema=db_schema, 
+        chunk_size=chunk_size,
+        backend_kwargs={"pool_pre_ping": True, "pool_recycle": 3600}
+    )
+
+    # --- LOGIQUE DE FILTRAGE ET REQUÊTES PERSONNALISÉES PAR INSTANCE ---
+    custom_tables: dict[str, str] = {} # Dictionnaire pour stocker les requêtes personnalisées
+
+    # 1. Chargement via variable d'environnement JSON (Format: {"table_name": "SELECT ..."})
+    # Pratique pour une configuration directe via Terraform env_vars
+    table_queries_raw = os.getenv("TABLE_QUERIES", "{}")
+    try:
+        parsed_queries = json.loads(table_queries_raw)
+        if isinstance(parsed_queries, dict):
+            custom_tables.update({str(k): str(v) for k, v in parsed_queries.items()})
+    except json.JSONDecodeError as e:
+        logging.error(f"Erreur lors du parsing de TABLE_QUERIES (JSON invalide): {e}")
+
+    # 2. Application des requêtes au dlt source (Mode Query)
+    for t_query_name, sql_query in custom_tables.items():
+        try:
+            # On force le nom de la table en minuscules pour correspondre à la normalisation dlt
+            t_name_norm = t_query_name.lower()
+            # On crée une ressource SQL spécifique
+            custom_res = sql_table(db_url, schema=db_schema, table_name=t_name_norm, query=sql_query)
+            source.resources.add(custom_res)
+            logging.info(f"Ressource personnalisée '{t_name_norm}' enregistrée (Mode Query via Env Var).")
+        except Exception as e:
+            logging.error(f"Erreur lors de l'application de la requête pour {t_query_name}: {e}")
 
     # --- LOGIQUE DE FILTRAGE CONSOLIDÉE ---
     all_resources = list(source.resources.keys())
-    selected = [n for n in all_resources if not n.upper().startswith("BIN$")]
+    # 1. Sélection par discovery (en excluant les tables BIN$ d'Oracle et les exclusions explicites)
+    discovery_selected = [n for n in all_resources if not n.upper().startswith("BIN$")]
+    
+    # On normalise aussi les clés des requêtes personnalisées pour l'union finale
+    custom_names_norm = [k.lower() for k in custom_tables.keys()]
+
+    if tables_exclude:
+        exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
+        # On n'exclut que si ce n'est pas une table "custom" (priorité au SQL)
+        discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list]
 
     if tables_include:
         include_list = [t.strip().lower() for t in tables_include.split(",")]
-        selected = [n for n in selected if n.lower() in include_list]
-    
-    # Application des filtres d'exclusion (insensible à la casse)
-    if tables_exclude:
-        exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
-        selected = [n for n in selected if n.lower() not in exclude_list]
+        discovery_selected = [n for n in discovery_selected if n.lower() in include_list]
 
     if tables_prefix:
         prefix = tables_prefix.strip().lower()
-        selected = [n for n in selected if n.lower().startswith(prefix)]
+        discovery_selected = [n for n in discovery_selected if n.lower().startswith(prefix)]
+
+    # 2. Union avec les tables personnalisées (qui outpassent les filtres d'exclusion/inclusion)
+    selected = list(set(discovery_selected) | set(custom_names_norm))
+
 
     if not selected:
         logging.warning("Aucune table ne correspond aux filtres spécifiés.")
@@ -175,11 +286,9 @@ def run_pipeline():
         exclude_cols = normalize_col(config.get("exclude"))
         cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
 
-        
         hints = {}
         if inc_col:
             hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing=cursor_missing)
-
         if pk_col:
             hints["primary_key"] = pk_col
         if w_disp:
@@ -204,6 +313,7 @@ def run_pipeline():
             if isinstance(cluster_cols, str):
                 cluster_cols = [cluster_cols]
             adapter_kwargs["cluster"] = list(cluster_cols)
+        
         if adapter_kwargs:
             bigquery_adapter(res, **adapter_kwargs)
             logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")

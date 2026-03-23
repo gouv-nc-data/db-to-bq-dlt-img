@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "dlt[bigquery,postgres,sql-database]>=1.18.2",
+    "sqlalchemy>=2.0.0",
     "oracledb>=2.5.0",
     "dotenv>=0.9.9",
     "google-cloud-logging>=3.11.0",
