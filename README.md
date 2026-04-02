@@ -24,7 +24,7 @@ Vous pouvez configurer un comportement global ou spécifique par table pour n'ex
 | `PRIMARY_KEY` | Clé primaire globale (requis pour le mode `merge`). | (vide) |
 | `TABLE_CONFIGS` | JSON de configuration spécifique par table (voir exemple ci-dessous). | `{}` |
 | `ON_CURSOR_VALUE_MISSING` | Comportement si la valeur d'incrément (`updated`) est `NULL` (`include`, `exclude`, `raise`). | `include` |
-| `TABLES_EXCLUDE_COLUMNS` | (Non implémenté globalement, utilisez `TABLE_CONFIGS`) | - |
+| `GLOBAL_EXCLUDE` | Liste de colonnes à exclure sur TOUTES les tables (ex: `created_by,updated_by`). | (vide) |
 | `NORMALIZE_START_METHOD`| Méthode de démarrage des workers (`spawn` ou `fork`). | `spawn` |
 
 #### Format de `TABLE_CONFIGS`

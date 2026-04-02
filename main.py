@@ -186,6 +186,10 @@ def run_pipeline():
     global_primary_key = os.getenv("PRIMARY_KEY")
     global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace")
     global_cursor_missing = os.getenv("ON_CURSOR_VALUE_MISSING", "include")
+    
+    # Exclusions globales appliquées à toutes les tables
+    global_exclude_raw = os.getenv("GLOBAL_EXCLUDE", "").strip()
+    global_exclude_list = [t.strip() for t in global_exclude_raw.split(",")] if global_exclude_raw else []
 
     # Configuration spécifique par table (JSON)
     table_configs_raw = os.getenv("TABLE_CONFIGS", "{}")
@@ -316,7 +320,15 @@ def run_pipeline():
         w_disp = config.get("write_disposition") or global_write_disposition
         partition_col = normalize_col(config.get("partition"))
         cluster_cols = normalize_col(config.get("cluster"))
-        exclude_cols = normalize_col(config.get("exclude"))
+        
+        # Fusion des exclusions spécifiques et globales
+        table_exclude = config.get("exclude") or []
+        if isinstance(table_exclude, str):
+            table_exclude = [table_exclude]
+        
+        combined_exclude = list(set(table_exclude + global_exclude_list))
+        exclude_cols = normalize_col(combined_exclude)
+
         cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
 
         hints = {}
