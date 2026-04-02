@@ -84,9 +84,38 @@ if hasattr(oracledb, "Connect"):
 import dlt
 from dlt.sources.sql_database import sql_database, sql_table
 from dlt.destinations.adapters import bigquery_adapter
+from dlt.destinations.exceptions import DatabaseUndefinedRelation
+from dlt.destinations.impl.bigquery import sql_client as bq_sql_client
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from google.cloud import secretmanager
+
+# --- PATCH 1 : BIGQUERY TRUNCATE — ignore les tables utilisateur inexistantes ---
+# DLT utilise `truncate-and-insert` par défaut pour write_disposition="replace".
+# Il tente un TRUNCATE avant d'insérer. Si la table a été supprimée manuellement,
+# le TRUNCATE échoue avec DatabaseUndefinedRelation. Ce patch l'intercepte table
+# par table et continue silencieusement : DLT créera la table lors du chargement.
+_original_truncate_tables = bq_sql_client.BigQuerySqlClient.truncate_tables
+
+def _safe_truncate_tables(self, *tables: str) -> None:
+    for table in tables:
+        try:
+            _original_truncate_tables(self, table)
+        except DatabaseUndefinedRelation:
+            logging.warning(
+                f"Table '{table}' introuvable lors du TRUNCATE (mode replace) — "
+                "elle sera créée lors du chargement des données."
+            )
+
+bq_sql_client.BigQuerySqlClient.truncate_tables = _safe_truncate_tables
+logging.info("Patch 1 actif : truncate_tables tolère les tables supprimées.")
+
+
+# NOTE : pour réinitialiser complètement DLT (ex: changement de colonnes), supprimer
+# le DATASET ENTIER `lisa` dans BigQuery. DLT le recrée avec toutes ses tables internes.
+# Ne JAMAIS supprimer uniquement les tables `_dlt_pipeline_state` ou `_dlt_loads`
+# sans supprimer le dataset entier — DLT crasherait car il ne les recrée pas.
+
 
 # Paramètre de normalisation (requis pour éviter les erreurs de fork avec certains pilotes)
 os.environ["NORMALIZE__START_METHOD"] = os.getenv("NORMALIZE_START_METHOD", "spawn")
@@ -102,27 +131,29 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
         sys.exit(1)
 
 # Événements SQLAlchemy pour renforcer le réglage de session et le handler
+# Ces handlers sont limités aux connexions oracledb pour ne pas perturber PostgreSQL.
 @event.listens_for(Engine, "connect")
 def set_oracle_params(dbapi_connection, connection_record):
-    """Configuration de la session Oracle et injection du handler de type"""
-    if not hasattr(dbapi_connection, "cursor"):
-         return
+    """Configuration de la session Oracle — ignoré si ce n'est pas une connexion oracledb."""
+    # On vérifie que c'est bien une connexion oracledb avant toute chose
+    # outputtypehandler est un attribut exclusif aux connexions oracledb
+    # (absent de psycopg2/PostgreSQL) — c'est le moyen de détecter le type
+    if not hasattr(dbapi_connection, "outputtypehandler"):
+        return
     cursor = dbapi_connection.cursor()
     try:
-        # Forçage des formats de date en ISO pour le convertisseur
         cursor.execute("ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'")
         cursor.execute("ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6'")
     except Exception:
         pass
     finally:
         cursor.close()
-    
     _apply_patch(dbapi_connection)
 
 @event.listens_for(Engine, "before_cursor_execute")
 def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
-    """Force l'installation du handler sur le curseur avant chaque exécution"""
-    if hasattr(cursor, "outputtypehandler"):
+    """Force l'installation du handler Oracle sur le curseur — ignoré si ce n'est pas oracledb."""
+    if hasattr(cursor, "outputtypehandler") and hasattr(getattr(cursor, "connection", None), "outputtypehandler"):
         cursor.outputtypehandler = oracle_output_type_handler
 
 def run_pipeline():
@@ -194,6 +225,8 @@ def run_pipeline():
         staging=staging,
         progress="log",
     )
+
+
 
     # Chargement de la source SQL Database
     chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
@@ -294,15 +327,28 @@ def run_pipeline():
         if w_disp:
             hints["write_disposition"] = w_disp
         
-        # Exclusion de colonnes (ex: bytea volumineux)
+        # Exclusion de colonnes (données + schéma)
         if exclude_cols:
             if isinstance(exclude_cols, str):
                 exclude_cols = [exclude_cols]
-            
-            # On s'assure que exclude_cols est traité comme une liste pour l'IDE (Pyre2)
             cols_to_skip = list(exclude_cols)
-            res.add_map(lambda item: {k: v for k, v in item.items() if k not in cols_to_skip})
-            logging.info(f"Colonnes exclues physiquement pour {res_name} : {cols_to_skip}")
+            # Filtre les données (bug closure corrigé via arg par défaut)
+            def _make_col_filter(skip_cols: list):
+                def _filter(item, meta=None):
+                    if item is None:
+                        return None
+                    return {k: v for k, v in item.items() if k not in skip_cols}
+                return _filter
+            res.add_map(_make_col_filter(cols_to_skip))
+
+            # Supprime les colonnes du schéma DLT pour qu'elles n'apparaissent pas dans BQ
+            for col in cols_to_skip:
+                try:
+                    del res.columns[col]
+                except (KeyError, TypeError):
+                    pass
+            logging.info(f"Colonnes exclues (données + schéma) pour {res_name} : {cols_to_skip}")
+
 
         # Partitionnement et clustering BigQuery via l'adapter dédié
         # Cela empêche l'auto-partitionnement de DLT et donne un contrôle explicite
