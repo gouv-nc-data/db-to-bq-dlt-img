@@ -211,12 +211,14 @@ def run_pipeline():
     destination_params = {"location": os.getenv("BQ_LOCATION", "EU")}
     if bq_project_id:
         destination_params["project_id"] = bq_project_id
+    
+    loader_format = os.getenv("LOADER_FILE_FORMAT", "parquet")
 
     # Staging GCS optionnel : accélère le chargement si un bucket est configuré
     bucket_url = os.getenv("BUCKET_URL")
     staging = 'filesystem' if bucket_url else None
     if bucket_url:
-        logging.info(f"Staging GCS activé : {bucket_url}")
+        logging.info(f"Staging GCS activé : {bucket_url} (Format: {loader_format})")
 
     # Nom du pipeline : auto-généré à partir du dataset pour isolation, ou via variable d'environnement
     default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
@@ -224,7 +226,7 @@ def run_pipeline():
 
     pipeline = dlt.pipeline(
         pipeline_name=pipeline_id,
-        destination=dlt.destinations.bigquery(**destination_params, loader_file_format="parquet"),
+        destination=dlt.destinations.bigquery(**destination_params),
         dataset_name=bq_dataset_id,
         staging=staging,
         progress="log",
@@ -387,7 +389,7 @@ def run_pipeline():
         logging.info("Exécution de la pipeline...")
         # On ne passe plus write_disposition globalement à run() car cela réinitialise l'état incrémental.
         # Le mode par défaut (replace) est déjà appliqué individuellement à chaque ressource via les hints (ligne 142/153).
-        load_info = pipeline.run(source)
+        load_info = pipeline.run(source, loader_file_format=loader_format)
         logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
     except Exception as e:
         logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)
