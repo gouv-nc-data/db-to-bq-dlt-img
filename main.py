@@ -256,13 +256,24 @@ def run_pipeline():
     except json.JSONDecodeError as e:
         logging.error(f"Erreur lors du parsing de TABLE_QUERIES (JSON invalide): {e}")
 
+    from sqlalchemy import text
+
     # 2. Application des requêtes au dlt source (Mode Query)
     for t_query_name, sql_query in custom_tables.items():
         try:
             # On force le nom de la table en minuscules pour correspondre à la normalisation dlt
             t_name_norm = t_query_name.lower()
             # On crée une ressource SQL spécifique
-            custom_res = sql_table(db_url, schema=db_schema, table_name=t_name_norm, query=sql_query)
+            
+            def make_query_adapter(query_str):
+                return lambda *args, **kwargs: text(query_str)
+
+            custom_res = sql_table(
+                db_url, 
+                schema=db_schema, 
+                table=t_name_norm, 
+                query_adapter_callback=make_query_adapter(sql_query)
+            )
             source.resources.add(custom_res)
             logging.info(f"Ressource personnalisée '{t_name_norm}' enregistrée (Mode Query via Env Var).")
         except Exception as e:
