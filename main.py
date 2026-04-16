@@ -266,7 +266,10 @@ def run_pipeline():
             # On crée une ressource SQL spécifique
             
             def make_query_adapter(query_str):
-                return lambda *args, **kwargs: text(query_str)
+                def query_adapter(*args, **kwargs):
+                    # Retourner la requête en liste pour que DLT la traite correctement
+                    return [text(query_str)]
+                return query_adapter
 
             custom_res = sql_table(
                 db_url, 
