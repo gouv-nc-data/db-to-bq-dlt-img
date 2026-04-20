@@ -244,43 +244,38 @@ def run_pipeline():
     )
 
     # --- LOGIQUE DE FILTRAGE ET REQUÊTES PERSONNALISÉES PAR INSTANCE ---
-    custom_tables: dict[str, str] = {} # Dictionnaire pour stocker les requêtes personnalisées
-
-    # 1. Chargement via variable d'environnement JSON (Format: {"table_name": "SELECT ..."})
-    # Pratique pour une configuration directe via Terraform env_vars
+    custom_tables: dict[str, str] = {}
     table_queries_raw = os.getenv("TABLE_QUERIES", "{}")
     try:
         parsed_queries = json.loads(table_queries_raw)
         if isinstance(parsed_queries, dict):
             custom_tables.update({str(k): str(v) for k, v in parsed_queries.items()})
     except json.JSONDecodeError as e:
-        logging.error(f"Erreur lors du parsing de TABLE_QUERIES (JSON invalide): {e}")
+        logging.error(f"Erreur lors du parsing de TABLE_QUERIES: {e}")
 
     from sqlalchemy import text
+    
+    # On normalise les clés en majuscules pour faciliter la comparaison avec Oracle (insensible à la casse)
+    normalized_queries = {k.upper(): v for k, v in custom_tables.items()}
 
-    # 2. Application des requêtes au dlt source (Mode Query)
-    for t_query_name, sql_query in custom_tables.items():
-        try:
-            # On force le nom de la table en minuscules pour correspondre à la normalisation dlt
-            t_name_norm = t_query_name.lower()
-            # On crée une ressource SQL spécifique
-            
-            def make_query_adapter(query_str):
-                def query_adapter(*args, **kwargs):
-                    # Retourner la requête en liste pour que DLT la traite correctement
-                    return [text(query_str)]
-                return query_adapter
+    def query_adapter_callback(query, table):
+        # On vérifie si une requête personnalisée existe pour cette table (insensible à la casse)
+        t_name_upper = table.name.upper()
+        if t_name_upper in normalized_queries:
+            custom_sql = normalized_queries[t_name_upper]
+            logging.info(f"### CUSTOM QUERY MATCHED ### Table: {table.name} -> Utilisation du SQL personnalisé.")
+            return text(custom_sql)
+        return query
 
-            custom_res = sql_table(
-                db_url, 
-                schema=db_schema, 
-                table=t_query_name, 
-                query_adapter_callback=make_query_adapter(sql_query)
-            )
-            source.resources.add(custom_res)
-            logging.info(f"Ressource personnalisée '{t_query_name}' enregistrée (Mode Query via Env Var).")
-        except Exception as e:
-            logging.error(f"Erreur lors de l'application de la requête pour {t_query_name}: {e}")
+    # Chargement de la source SQL Database avec le callback d'adaptation
+    chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
+    source = sql_database(
+        db_url, 
+        schema=db_schema, 
+        chunk_size=chunk_size,
+        query_adapter_callback=query_adapter_callback,
+        backend_kwargs={"pool_pre_ping": True, "pool_recycle": 3600}
+    )
 
     # --- LOGIQUE DE FILTRAGE CONSOLIDÉE ---
     all_resources = list(source.resources.keys())
@@ -293,7 +288,11 @@ def run_pipeline():
     if tables_exclude:
         exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
         # On n'exclut que si ce n'est pas une table "custom" (priorité au SQL)
-        discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list]
+        # discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list]
+        
+        # NOTE : On n'exclut plus les tables qui ont un SQL personnalisé,
+        # même si elles sont dans la liste d'exclusion (pour éviter les conflits)
+        discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list or n.lower() in custom_names_norm]
 
     if tables_include:
         include_list = [t.strip().lower() for t in tables_include.split(",")]
@@ -303,7 +302,7 @@ def run_pipeline():
         prefix = tables_prefix.strip().lower()
         discovery_selected = [n for n in discovery_selected if n.lower().startswith(prefix)]
 
-    # 2. Union avec les tables personnalisées (qui outpassent les filtres d'exclusion/inclusion)
+    # 2. Union avec les tables personnalisées (qui outpassent les filtres)
     selected = list(set(discovery_selected) | set(custom_names_norm))
 
 
