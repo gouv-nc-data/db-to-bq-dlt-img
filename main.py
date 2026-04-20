@@ -274,11 +274,11 @@ def run_pipeline():
             custom_res = sql_table(
                 db_url, 
                 schema=db_schema, 
-                table=t_name_norm, 
+                table=t_query_name, 
                 query_adapter_callback=make_query_adapter(sql_query)
             )
             source.resources.add(custom_res)
-            logging.info(f"Ressource personnalisée '{t_name_norm}' enregistrée (Mode Query via Env Var).")
+            logging.info(f"Ressource personnalisée '{t_query_name}' enregistrée (Mode Query via Env Var).")
         except Exception as e:
             logging.error(f"Erreur lors de l'application de la requête pour {t_query_name}: {e}")
 
@@ -406,6 +406,11 @@ def run_pipeline():
         load_info = pipeline.run(source, loader_file_format=loader_format)
         logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
     except Exception as e:
+        error_msg = str(e)
+        if "ORA-08103" in error_msg:
+            logging.critical("ERREUR CRITIQUE ORACLE : ORA-08103 (Objet inexistant).")
+            logging.critical("Une table a été modifiée (truncate/drop/move) pendant sa lecture.")
+        
         logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)
         sys.exit(1)
 
