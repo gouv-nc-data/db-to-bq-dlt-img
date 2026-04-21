@@ -86,8 +86,8 @@ from dlt.sources.sql_database import sql_database, sql_table
 from dlt.destinations.adapters import bigquery_adapter
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 from dlt.destinations.impl.bigquery import sql_client as bq_sql_client
-from sqlalchemy import event
-from sqlalchemy.engine import Engine
+from sqlalchemy import event, create_engine, text, inspect
+from sqlalchemy.engine import Engine, make_url
 from google.cloud import secretmanager
 
 # --- PATCH 1 : BIGQUERY TRUNCATE — ignore les tables utilisateur inexistantes ---
@@ -119,6 +119,12 @@ logging.info("Patch 1 actif : truncate_tables tolère les tables supprimées.")
 
 # Paramètre de normalisation (requis pour éviter les erreurs de fork avec certains pilotes)
 os.environ["NORMALIZE__START_METHOD"] = os.getenv("NORMALIZE_START_METHOD", "spawn")
+
+# Force dlt à tolérer les schémas partiels (ex: quand on utilise une requête personnalisée qui
+# omet des colonnes reflétées par erreur). Au lieu de crasher sur "ArrowInvalid", dlt
+# promouvra les types et remplira les colonnes manquantes avec des NULL.
+os.environ["SOURCES__SQL_DATABASE__ARROW_CONCAT_PROMOTE_OPTIONS"] = "full"
+logging.info("Promotion de schéma Arrow configurée sur 'full'.")
 
 # Mode Thick Oracle (requis pour les versions < 12.1 ou les types complexes)
 if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
@@ -224,193 +230,262 @@ def run_pipeline():
     default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
     pipeline_id = os.getenv("PIPELINE_NAME", default_pipeline_name)
 
-    pipeline = dlt.pipeline(
-        pipeline_name=pipeline_id,
-        destination=dlt.destinations.bigquery(**destination_params),
-        dataset_name=bq_dataset_id,
-        staging=staging,
-        progress="log",
-    )
-
-
-
-    # Chargement de la source SQL Database
-    chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
-    source = sql_database(
-        db_url, 
-        schema=db_schema, 
-        chunk_size=chunk_size,
-        backend_kwargs={"pool_pre_ping": True, "pool_recycle": 3600}
-    )
-
-    # --- LOGIQUE DE FILTRAGE ET REQUÊTES PERSONNALISÉES PAR INSTANCE ---
-    custom_tables: dict[str, str] = {}
-    table_queries_raw = os.getenv("TABLE_QUERIES", "{}")
     try:
-        parsed_queries = json.loads(table_queries_raw)
-        if isinstance(parsed_queries, dict):
-            custom_tables.update({str(k): str(v) for k, v in parsed_queries.items()})
-    except json.JSONDecodeError as e:
-        logging.error(f"Erreur lors du parsing de TABLE_QUERIES: {e}")
-
-    from sqlalchemy import text
-    
-    # On normalise les clés en majuscules pour faciliter la comparaison avec Oracle (insensible à la casse)
-    normalized_queries = {k.upper(): v for k, v in custom_tables.items()}
-
-    def query_adapter_callback(query, table):
-        # On vérifie si une requête personnalisée existe pour cette table (insensible à la casse)
-        t_name_upper = table.name.upper()
-        if t_name_upper in normalized_queries:
-            custom_sql = normalized_queries[t_name_upper]
-            logging.info(f"### CUSTOM QUERY MATCHED ### Table: {table.name} -> Utilisation du SQL personnalisé.")
-            return text(custom_sql)
-        return query
-
-    # Chargement de la source SQL Database avec le callback d'adaptation
-    chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
-    source = sql_database(
-        db_url, 
-        schema=db_schema, 
-        chunk_size=chunk_size,
-        query_adapter_callback=query_adapter_callback,
-        backend_kwargs={"pool_pre_ping": True, "pool_recycle": 3600}
-    )
-
-    # --- LOGIQUE DE FILTRAGE CONSOLIDÉE ---
-    all_resources = list(source.resources.keys())
-    # 1. Sélection par discovery (en excluant les tables BIN$ d'Oracle et les exclusions explicites)
-    discovery_selected = [n for n in all_resources if not n.upper().startswith("BIN$")]
-    
-    # On normalise aussi les clés des requêtes personnalisées pour l'union finale
-    custom_names_norm = [k.lower() for k in custom_tables.keys()]
-
-    if tables_exclude:
-        exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
-        # On n'exclut que si ce n'est pas une table "custom" (priorité au SQL)
-        # discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list]
+        logging.info("--- DÉMARRAGE DE LA PIPELINE (Debug Mode) ---")
+        pipeline = dlt.pipeline(
+            pipeline_name=pipeline_id,
+            destination=dlt.destinations.bigquery(**destination_params),
+            dataset_name=bq_dataset_id,
+            staging=staging,
+            progress="log",
+        )
         
-        # NOTE : On n'exclut plus les tables qui ont un SQL personnalisé,
-        # même si elles sont dans la liste d'exclusion (pour éviter les conflits)
-        discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list or n.lower() in custom_names_norm]
-
-    if tables_include:
-        include_list = [t.strip().lower() for t in tables_include.split(",")]
-        discovery_selected = [n for n in discovery_selected if n.lower() in include_list]
-
-    if tables_prefix:
-        prefix = tables_prefix.strip().lower()
-        discovery_selected = [n for n in discovery_selected if n.lower().startswith(prefix)]
-
-    # 2. Union avec les tables personnalisées (qui outpassent les filtres)
-    selected = list(set(discovery_selected) | set(custom_names_norm))
+        # Création de l'engine SQLAlchemy pour l'inspection et dlt
+        # Augmentation substantielle du pool pour supporter le parallélisme dlt (surtout avec 300+ tables)
+        # pool_size: connexions maintenues, max_overflow: connexions temporaires autorisées.
+        engine = create_engine(
+            db_url, 
+            pool_pre_ping=True,
+            pool_size=20,       # On s'aligne sur le parallélisme dlt
+            max_overflow=30,    # Marge pour les pics de charge
+            pool_timeout=60,    # Temps d'attente max pour une connexion
+            pool_recycle=3600,  # Recycle les connexions pour éviter les timeouts (Oracle/Postgres)
+            echo=False          # Désactive le log SQL détaillé pour la prod
+        )
 
 
-    if not selected:
-        logging.warning("Aucune table ne correspond aux filtres spécifiés.")
-        return
+        # --- LOGIQUE DE FILTRAGE ET REQUÊTES PERSONNALISÉES PAR INSTANCE ---
+        custom_tables: dict[str, str] = {}
+        table_queries_raw = os.getenv("TABLE_QUERIES", "{}")
+        try:
+            parsed_queries = json.loads(table_queries_raw)
+            if isinstance(parsed_queries, dict):
+                custom_tables.update({str(k): str(v) for k, v in parsed_queries.items()})
+        except json.JSONDecodeError as e:
+            logging.error(f"Erreur lors du parsing de TABLE_QUERIES: {e}")
 
-    source = source.with_resources(*selected)
-    
-    # Utilisation du normaliseur natif de la source (déjà initialisé)
-    naming = source.schema.naming
+        from sqlalchemy import text
+        
+        # On normalise les clés en majuscules pour faciliter la comparaison avec Oracle (insensible à la casse)
+        normalized_queries = {k.upper(): v for k, v in custom_tables.items()}
 
-    def normalize_col(col):
-        if not col:
+        # --- CONFIGURATION DYNAMIQUE DES RESSOURCES (Fix Arrow Nullability) ---
+        def query_adapter_callback(query, table):
+            """
+            Callback dlt appelé UNIQUEMENT pour les tables standards, pas sur les requêtes perso.
+            Force la nullabilité sur les colonnes reflétées automatiquement.
+            """
+            t_name_upper = table.name.upper()
+            
+            # Force Nullability (Sécurité anti-crash Arrow)
+            try:
+                if table.columns:
+                    null_hints = {col_name: {'nullable': True} for col_name in table.columns}
+                    table.apply_hints(columns=null_hints)
+                    logging.info(f"Nullability : {len(null_hints)} colonnes forcées à NULLABLE pour {table.name}")
+            except Exception as e:
+                logging.debug(f"Info nullability (non critique) pour {table.name}: {e}")
+            
+            return query
+
+        # Chargement de la source SQL Database avec le callback d'adaptation
+        # --- SÉLECTION DES TABLES STANDARDS (Discovery) ---
+        # On utilise l'inspecteur SQLAlchemy pour lister les tables AVANT d'initialiser dlt.
+        # Cela permet d'empêcher dlt de refléter des tables que l'on va traiter manuellement.
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        all_db_tables = inspector.get_table_names(schema=db_schema)
+        
+        discovery_selected = [n for n in all_db_tables if not n.upper().startswith("BIN$")]
+        
+        # Correction du mapping : on garde les noms originaux de la base source 
+        # (indispensable pour Oracle qui est sensible à la casse (majuscules)).
+        
+        # Filtres inclusion/exclusion/prefix
+        if tables_exclude:
+            exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
+            discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list]
+
+        if tables_include:
+            include_list = [t.strip().lower() for t in tables_include.split(",")]
+            discovery_selected = [n for n in discovery_selected if n.lower() in include_list]
+
+        if tables_prefix:
+            prefix = tables_prefix.strip().lower()
+            discovery_selected = [n for n in discovery_selected if n.lower().startswith(prefix)]
+
+        # On EXCLUT les tables qui ont un SQL personnalisé de la découverte automatique
+        # pour éviter toute réflexion de colonnes indésirables par dlt.
+        final_discovery_names = [n for n in discovery_selected if n.upper() not in normalized_queries]
+
+        logging.info(f"Tables sélectionnées pour la découverte automatique : {final_discovery_names}")
+
+        # Chargement de la source SQL Database UNIQUEMENT pour les tables standards
+        chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
+        source = sql_database(
+            engine, 
+            schema=db_schema, 
+            chunk_size=chunk_size,
+            table_names=final_discovery_names, # On limite la réflexion à ces tables uniquement
+            query_adapter_callback=query_adapter_callback
+        )
+        
+        # On renomme la source pour forcer dlt à ignorer l'ancien schéma pollué
+        # (dlt stocke le schéma par nom de source dans BigQuery)
+        source = source.clone(with_name=f"source_{bq_dataset_id}")
+
+        # On définit ces ressources manuellement à partir du SQL pour éviter que dlt 
+        # ne reflète les colonnes sensibles de la table Oracle d'origine.
+        def make_manual_resource(name, sql, chunk_size):
+            """Crée une ressource dlt manuelle sans aucune réflexion automatique."""
+            @dlt.resource(name=name, write_disposition=global_write_disposition)
+            def manual_resource_gen():
+                # On utilise engine.connect() directement pour plus de légèreté
+                with engine.connect() as conn:
+                    # stream_results=True (si supporté) aide à la mémoire
+                    result = conn.execution_options(yield_per=chunk_size).execute(text(sql))
+                    for row in result:
+                        yield dict(row._mapping)
+            
+            return manual_resource_gen
+
+        custom_resources = []
+        for t_name, custom_sql in custom_tables.items():
+            logging.info(f"Préparation de la ressource manuelle : {t_name}")
+            custom_resources.append(make_manual_resource(t_name, custom_sql, chunk_size))
+
+        # On ajoute les ressources manuelles (propres) à la source dlt
+        for res in custom_resources:
+            source.resources[res.name] = res
+        
+        selected = list(source.resources.keys())
+        
+        # Utilisation du normaliseur natif de la source
+        naming = source.schema.naming
+
+        def normalize_col(col):
+            if not col:
+                return col
+            if isinstance(col, str):
+                return naming.normalize_identifier(col)
+            if isinstance(col, list):
+                return [naming.normalize_identifier(c) for c in col]
             return col
-        if isinstance(col, str):
-            return naming.normalize_identifier(col)
-        if isinstance(col, list):
-            return [naming.normalize_identifier(c) for c in col]
-        return col
 
-    # --- APPLICATION DES CONFIGURATIONS SPÉCIFIQUES (Incrémental, PK, Partitionnement) ---
-    for res_name in selected:
-        res = source.resources[res_name]
-        # Recherche de config spécifique (insensible à la casse)
-        config = table_configs.get(res_name.lower()) or {}
-        
-        inc_col = normalize_col(config.get("incremental") or global_incremental_col)
-        pk_col = normalize_col(config.get("primary_key") or global_primary_key)
-        w_disp = config.get("write_disposition") or global_write_disposition
-        partition_col = normalize_col(config.get("partition"))
-        cluster_cols = normalize_col(config.get("cluster"))
-        
-        # Fusion des exclusions spécifiques et globales
-        table_exclude = config.get("exclude") or []
-        if isinstance(table_exclude, str):
-            table_exclude = [table_exclude]
-        
-        combined_exclude = list(set(table_exclude + global_exclude_list))
-        exclude_cols = normalize_col(combined_exclude)
+        # --- APPLICATION DES CONFIGURATIONS SPÉCIFIQUES (Incrémental, PK, Partitionnement) ---
+        for res_name in selected:
+            res = source.resources[res_name]
+            t_name_upper = res_name.upper()
 
-        cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
+            # Recherche de config spécifique (insensible à la casse)
+            config = table_configs.get(res_name.lower()) or {}
+            
+            inc_col = normalize_col(config.get("incremental") or global_incremental_col)
+            pk_col = normalize_col(config.get("primary_key") or global_primary_key)
+            w_disp = config.get("write_disposition") or global_write_disposition
+            partition_col = normalize_col(config.get("partition"))
+            cluster_cols = normalize_col(config.get("cluster"))
+            
+            # Fusion des exclusions spécifiques et globales
+            table_exclude = config.get("exclude") or []
+            if isinstance(table_exclude, str):
+                table_exclude = [table_exclude]
+            
+            combined_exclude = list(set(table_exclude + global_exclude_list))
+            exclude_cols = normalize_col(combined_exclude)
 
-        hints = {}
-        if inc_col:
-            hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing=cursor_missing)
-        if pk_col:
-            hints["primary_key"] = pk_col
-        if w_disp:
-            hints["write_disposition"] = w_disp
-        
-        # Exclusion de colonnes (données + schéma)
-        if exclude_cols:
-            if isinstance(exclude_cols, str):
-                exclude_cols = [exclude_cols]
-            cols_to_skip = list(exclude_cols)
-            # Filtre les données (bug closure corrigé via arg par défaut)
-            def _make_col_filter(skip_cols: list):
-                def _filter(item, meta=None):
-                    if item is None:
-                        return None
-                    return {k: v for k, v in item.items() if k not in skip_cols}
-                return _filter
-            res.add_map(_make_col_filter(cols_to_skip))
+            cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
 
-            # Supprime les colonnes du schéma DLT pour qu'elles n'apparaissent pas dans BQ
-            for col in cols_to_skip:
-                try:
-                    del res.columns[col]
-                except (KeyError, TypeError):
-                    pass
-            logging.info(f"Colonnes exclues (données + schéma) pour {res_name} : {cols_to_skip}")
+            hints = {}
+            if inc_col:
+                hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing=cursor_missing)
+            if pk_col:
+                hints["primary_key"] = pk_col
+            if w_disp:
+                hints["write_disposition"] = w_disp
+            
+            # Exclusion de colonnes (données + schéma)
+            if exclude_cols:
+                if isinstance(exclude_cols, str):
+                    exclude_cols = [exclude_cols]
+                cols_to_skip = list(exclude_cols)
+                # Filtre les données (bug closure corrigé via arg par défaut)
+                def _make_col_filter(skip_cols: list):
+                    def _filter(item, meta=None):
+                        if item is None:
+                            return None
+                        return {k: v for k, v in item.items() if k not in skip_cols}
+                    return _filter
+                res.add_map(_make_col_filter(cols_to_skip))
+
+                # Supprime les colonnes du schéma DLT pour qu'elles n'apparaissent pas dans BQ
+                for col in cols_to_skip:
+                    try:
+                        del res.columns[col]
+                    except (KeyError, TypeError):
+                        pass
+                logging.info(f"Colonnes exclues (données + schéma) pour {res_name} : {cols_to_skip}")
 
 
-        # Partitionnement et clustering BigQuery via l'adapter dédié
-        # Cela empêche l'auto-partitionnement de DLT et donne un contrôle explicite
-        adapter_kwargs = {}
-        if partition_col:
-            adapter_kwargs["partition"] = partition_col
-        if cluster_cols:
-            if isinstance(cluster_cols, str):
-                cluster_cols = [cluster_cols]
-            adapter_kwargs["cluster"] = list(cluster_cols)
-        
-        if adapter_kwargs:
-            bigquery_adapter(res, **adapter_kwargs)
-            logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")
+            # Partitionnement et clustering BigQuery via l'adapter dédié
+            # Cela empêche l'auto-partitionnement de DLT et donne un contrôle explicite
+            adapter_kwargs = {}
+            if partition_col:
+                adapter_kwargs["partition"] = partition_col
+            if cluster_cols:
+                if isinstance(cluster_cols, str):
+                    cluster_cols = [cluster_cols]
+                adapter_kwargs["cluster"] = list(cluster_cols)
+            
+            if adapter_kwargs:
+                bigquery_adapter(res, **adapter_kwargs)
+                logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")
 
-        if hints:
-            res.apply_hints(**hints)
-            logging.info(f"Configuration appliquée pour {res_name}: {hints}")
+            if hints:
+                res.apply_hints(**hints)
+                logging.info(f"Configuration appliquée pour {res_name}: {hints}")
 
-    logging.info(f"Ressources prêtes pour le transfert : {selected}")
+            # Force la nullabilité sur TOUTES les colonnes du schéma dlt ---
+            # Cela couvre les colonnes reflétées, même si elles ne sont pas dans TABLE_QUERIES.
+            if res.columns:
+                force_null_hints = {c: {"nullable": True} for c in res.columns}
+                res.apply_hints(columns=force_null_hints)
+                logging.debug(f"Schéma : {len(force_null_hints)} colonnes forcées à NULLABLE pour {res_name}")
+
+
+        logging.info(f"Ressources prêtes pour le transfert : {selected}")
 
     # Exécution
-    try:
-        logging.info("Exécution de la pipeline...")
-        # On ne passe plus write_disposition globalement à run() car cela réinitialise l'état incrémental.
-        # Le mode par défaut (replace) est déjà appliqué individuellement à chaque ressource via les hints (ligne 142/153).
-        load_info = pipeline.run(source, loader_file_format=loader_format)
-        logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
+        try:
+            logging.info("Exécution de la pipeline...")
+            # On ne passe plus write_disposition globalement à run() car cela réinitialise l'état incrémental.
+            # Le mode par défaut (replace) est déjà appliqué individuellement à chaque ressource via les hints
+            load_info = pipeline.run(source, loader_file_format=loader_format)
+            logging.info(f"Pipeline terminée avec succès. Info: {load_info}")
+        except Exception as e:
+            error_msg = f"!!! CRASH FATAL (pipeline.run) !!! : {str(e)}"
+            # Tentative de récupération des détails BigQuery
+            details = getattr(e, "details", None) or getattr(e, "message", None)
+            if details:
+                error_msg += f"\nDétails: {details}"
+            
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            with open("/tmp/error_trace.log", "w") as f:
+                f.write(error_msg + "\n")
+                f.write(traceback.format_exc())
+            logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)
+            sys.exit(1)
     except Exception as e:
-        error_msg = str(e)
-        if "ORA-08103" in error_msg:
-            logging.critical("ERREUR CRITIQUE ORACLE : ORA-08103 (Objet inexistant).")
-            logging.critical("Une table a été modifiée (truncate/drop/move) pendant sa lecture.")
-        
-        logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)
+        error_msg = f"!!! CRASH GLOBAL (run_pipeline) !!! : {str(e)}"
+        print(error_msg)
+        import traceback
+        traceback.print_exc()
+        with open("/tmp/error_trace_global.log", "w") as f:
+            f.write(error_msg + "\n")
+            f.write(traceback.format_exc())
+        logging.error(f"Erreur globale dans run_pipeline: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":
