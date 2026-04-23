@@ -270,23 +270,17 @@ def run_pipeline():
         normalized_queries = {k.upper(): v for k, v in custom_tables.items()}
 
         # --- CONFIGURATION DYNAMIQUE DES RESSOURCES (Fix Arrow Nullability) ---
-        def query_adapter_callback(query, table):
+        def table_adapter_callback(table):
             """
-            Callback dlt appelé UNIQUEMENT pour les tables standards, pas sur les requêtes perso.
-            Force la nullabilité sur les colonnes reflétées automatiquement.
+            Callback dlt interceptant la réflexion SQLAlchemy AVANT la génération pyarrow.
+            Cela force nullability=True au niveau le plus bas pour éviter les crashs Arrow.
             """
-            t_name_upper = table.name.upper()
-            
-            # Force Nullability (Sécurité anti-crash Arrow)
             try:
-                if table.columns:
-                    null_hints = {col_name: {'nullable': True} for col_name in table.columns}
-                    table.apply_hints(columns=null_hints)
-                    logging.info(f"Nullability : {len(null_hints)} colonnes forcées à NULLABLE pour {table.name}")
+                for col in table.columns:
+                    col.nullable = True
+                logging.debug(f"Nullability : {len(table.columns)} colonnes forcées à NULLABLE pour {table.name} (via table_adapter)")
             except Exception as e:
                 logging.debug(f"Info nullability (non critique) pour {table.name}: {e}")
-            
-            return query
 
         # Chargement de la source SQL Database avec le callback d'adaptation
         # --- SÉLECTION DES TABLES STANDARDS (Discovery) ---
@@ -327,7 +321,7 @@ def run_pipeline():
             schema=db_schema, 
             chunk_size=chunk_size,
             table_names=final_discovery_names, # On limite la réflexion à ces tables uniquement
-            query_adapter_callback=query_adapter_callback
+            table_adapter_callback=table_adapter_callback
         )
         
         # On renomme la source pour forcer dlt à ignorer l'ancien schéma pollué
