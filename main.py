@@ -380,13 +380,34 @@ def run_pipeline():
             partition_col = normalize_col(config.get("partition"))
             cluster_cols = normalize_col(config.get("cluster"))
             
+            # Inclusion de colonnes (liste blanche — prioritaire sur exclude)
+            table_include = config.get("include") or []
+            if isinstance(table_include, str):
+                table_include = [table_include]
+            include_cols = normalize_col(table_include)
+
             # Fusion des exclusions spécifiques et globales
             table_exclude = config.get("exclude") or []
             if isinstance(table_exclude, str):
                 table_exclude = [table_exclude]
-            
+
             combined_exclude = list(set(table_exclude + global_exclude_list))
             exclude_cols = normalize_col(combined_exclude)
+
+            # Si une liste d'inclusion est définie et que des colonnes sont connues (réflexion auto),
+            # on calcule l'exclusion par différence : toutes les colonnes non listées sont exclues.
+            # Non applicable aux ressources manuelles (TABLE_QUERIES) sans schéma réfléchi.
+            if include_cols:
+                if res.columns:
+                    all_cols = list(res.columns.keys())
+                    derived_exclude = [c for c in all_cols if c not in include_cols]
+                    exclude_cols = derived_exclude
+                    logging.info(f"Inclusion de colonnes pour {res_name} : {include_cols} → {len(derived_exclude)} colonnes exclues")
+                else:
+                    logging.warning(
+                        f"'include' ignoré pour {res_name} : schéma non disponible "
+                        "(ressource manuelle via TABLE_QUERIES — filtrer directement dans le SQL)."
+                    )
 
             cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
 

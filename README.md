@@ -49,9 +49,19 @@ Cette variable permet de définir des règles précises pour chaque table (insen
     "primary_key": "id",
     "write_disposition": "merge",
     "on_cursor_value_missing": "exclude"
+  },
+  "CONTACTS": {
+    "include": ["id", "nom", "prenom", "email", "date_maj"],
+    "incremental": "date_maj",
+    "primary_key": "id",
+    "write_disposition": "merge"
   }
 }
 ```
+
+> [!TIP]
+> **Inclusion de colonnes (liste blanche)** : La clé `include` définit les seules colonnes à copier vers BigQuery. Toutes les autres colonnes sont ignorées. C'est l'inverse de `exclude` et elle est prioritaire sur celui-ci. Utile pour les tables avec de nombreuses colonnes sensibles ou inutiles dont on ne veut copier qu'un sous-ensemble précis.
+> **Limitation** : `include` n'est pas supporté pour les tables avec un SQL personnalisé (`TABLE_QUERIES`) — dans ce cas, filtrer directement dans la requête SQL.
 
 > [!TIP]
 > **Exclusion de colonnes** : Idéal pour les champs `bytea` ou `blob` (pièces jointes) qui alourdissent inutilement le transfert vers BigQuery.
