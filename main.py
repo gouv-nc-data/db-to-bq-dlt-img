@@ -36,6 +36,8 @@ logging.captureWarnings(True)
 
 # --- MONKEY PATCH ORACLEDB (EMPECHE LES CRASH SUR DATES INVALIDES) ---
 import oracledb
+oracledb.defaults.arraysize = 10000     # au lieu de 100                                                                           
+oracledb.defaults.prefetchrows = 10000  # prefetch côté driver pour accélérer les gros chargements (surtout avec dlt qui traite par lots)
 
 def date_out_converter(val):
     """Convertisseur pour les dates Oracle hors intervalle Python (ex: année -5579)"""
@@ -170,9 +172,6 @@ def run_pipeline():
     response = client.access_secret_version(request={"name": secret_url})
     db_url = response.payload.data.decode("UTF-8").strip()
     
-    if "oracle" in db_url :
-        oracledb.defaults.arraysize = 10000     # au lieu de 100                                                                           
-        oracledb.defaults.prefetchrows = 10000  # prefetch côté driver 
     # Injection automatique de disable_oob=true pour le mode Oracle Thin
     # Cela évite les lenteurs/blocages liés au "Out of Band" breaks, fréquents dans Docker/K8s
     if "oracle" in db_url and "disable_oob=true" not in db_url and os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() != "true":
