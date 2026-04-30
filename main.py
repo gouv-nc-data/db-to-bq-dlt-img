@@ -425,11 +425,17 @@ def run_pipeline():
                     exclude_cols = [exclude_cols]
                 cols_to_skip = list(exclude_cols)
                 # Filtre les données (bug closure corrigé via arg par défaut)
+                # Gère les deux modes DLT : dict (json) et pyarrow.Table (parquet/arrow)
                 def _make_col_filter(skip_cols: list):
+                    skip_set = set(skip_cols)
                     def _filter(item, meta=None):
                         if item is None:
                             return None
-                        return {k: v for k, v in item.items() if k not in skip_cols}
+                        if hasattr(item, 'column_names'):
+                            # Mode parquet/arrow : item est un pyarrow.Table
+                            cols_to_keep = [c for c in item.column_names if c not in skip_set]
+                            return item.select(cols_to_keep)
+                        return {k: v for k, v in item.items() if k not in skip_set}
                     return _filter
                 res.add_map(_make_col_filter(cols_to_skip))
 
