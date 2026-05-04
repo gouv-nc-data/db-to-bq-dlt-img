@@ -55,6 +55,76 @@ Cette variable permet de définir des règles précises pour chaque table (insen
     "incremental": "date_maj",
     "primary_key": "id",
     "write_disposition": "merge"
+  },
+  "T_ARTICLE": {
+    "primary_key": "id",
+    "incremental": "updated",
+    "write_disposition": "merge",
+    "include": ["id", "enr_acte_id", "nature_id", "assiette", "updated"],
+    "columns": {
+      "assiette": {
+        "data_type": "wei"
+      }
+    }
+  }
+}
+```
+
+Clés supportées par table dans `TABLE_CONFIGS` :
+
+- `incremental`, `primary_key`, `write_disposition`, `partition`, `cluster`
+- `include`, `exclude`, `on_cursor_value_missing`
+- `columns` : hints DLT par colonne (ex: `data_type`, `precision`, `scale`, `nullable`, etc.)
+
+Comportement de `columns` :
+
+- Rétrocompatible : si `columns` est absent, aucun changement de comportement.
+- Les noms de colonnes sont normalisés comme le reste de la pipeline.
+- Les hints utilisateur sont fusionnés avec les hints internes de nullabilité (`nullable=true` forcé par défaut).
+- Si une colonne définie dans `columns` est absente du schéma (typo, colonne exclue, ou non réfléchie), un warning est loggé et la pipeline continue.
+
+#### Mappings DLT vers BigQuery (utile pour `columns`)
+
+| `data_type` DLT | Type BigQuery | Notes |
+| --- | --- | --- |
+| `decimal` | `NUMERIC` | Par défaut `(38, 9)`, respecte `precision`/`scale` si fournis (limites `precision - scale <= 29`). |
+| `wei` | `BIGNUMERIC` | Jusqu'à `(76, 38)` ; pas de limite `precision - scale`. |
+| `bigint` | `INT64` | |
+| `double` | `FLOAT64` | |
+| `text` | `STRING` | |
+
+#### Exemple Terraform (`TABLE_CONFIGS`) avec hints de colonnes
+
+```hcl
+{
+  "t_article" = {
+    primary_key       = "id"
+    incremental       = "updated"
+    write_disposition = "merge"
+    include           = ["id", "enr_acte_id", "nature_id", "assiette", "updated"]
+    columns = {
+      assiette = { data_type = "wei" }
+    }
+  }
+
+  "t_fisc_all_declaration" = {
+    primary_key       = "id"
+    incremental       = "updated"
+    write_disposition = "merge"
+    columns = {
+      montant_a_payer = { data_type = "wei" }
+      montant_paye    = { data_type = "wei" }
+    }
+  }
+
+  "t_rec_proc_recouvrement" = {
+    primary_key       = "id"
+    incremental       = "updated"
+    write_disposition = "merge"
+    columns = {
+      pcol_montant_prov = { data_type = "wei" }
+      atd_montant_paye  = { data_type = "wei" }
+    }
   }
 }
 ```

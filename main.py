@@ -36,7 +36,7 @@ logging.captureWarnings(True)
 
 # --- MONKEY PATCH ORACLEDB (EMPECHE LES CRASH SUR DATES INVALIDES) ---
 import oracledb
-oracledb.defaults.arraysize = 10000     # au lieu de 100                                                                           
+oracledb.defaults.arraysize = 10000     # au lieu de 100
 oracledb.defaults.prefetchrows = 10000  # prefetch côté driver pour accélérer les gros chargements (surtout avec dlt qui traite par lots)
 
 def date_out_converter(val):
@@ -57,7 +57,7 @@ def date_out_converter(val):
 
 def oracle_output_type_handler(cursor, metadata):
     """Handler global pour intercepter les types temporels et les traiter via date_out_converter"""
-    if metadata.type in (oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_TIMESTAMP, 
+    if metadata.type in (oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_TIMESTAMP,
                          oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ):
         return cursor.var(oracledb.DB_TYPE_VARCHAR, arraysize=cursor.arraysize, outconverter=date_out_converter)
 
@@ -171,7 +171,7 @@ def run_pipeline():
     client = secretmanager.SecretManagerServiceClient()
     response = client.access_secret_version(request={"name": secret_url})
     db_url = response.payload.data.decode("UTF-8").strip()
-    
+
     # Injection automatique de disable_oob=true pour le mode Oracle Thin
     # Cela évite les lenteurs/blocages liés au "Out of Band" breaks, fréquents dans Docker/K8s
     if "oracle" in db_url and "disable_oob=true" not in db_url and os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() != "true":
@@ -183,7 +183,7 @@ def run_pipeline():
     db_schema = os.getenv("DB_SCHEMA", "").strip() or None
     bq_dataset_id = os.getenv("BQ_DATASET_ID", "").strip()
     bq_project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
-    
+
     # Inclusion/Exclusion/Préfixe de tables
     tables_include = os.getenv("TABLES_INCLUDE") or os.getenv("TABLE_INCLUDE")
     tables_exclude = os.getenv("TABLES_EXCLUDE") or os.getenv("TABLE_EXCLUDE")
@@ -194,7 +194,7 @@ def run_pipeline():
     global_primary_key = os.getenv("PRIMARY_KEY")
     global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace")
     global_cursor_missing = os.getenv("ON_CURSOR_VALUE_MISSING", "include")
-    
+
     # Exclusions globales appliquées à toutes les tables
     global_exclude_raw = os.getenv("GLOBAL_EXCLUDE", "").strip()
     global_exclude_list = [t.strip() for t in global_exclude_raw.split(",")] if global_exclude_raw else []
@@ -219,7 +219,7 @@ def run_pipeline():
     destination_params = {"location": os.getenv("BQ_LOCATION", "EU")}
     if bq_project_id:
         destination_params["project_id"] = bq_project_id
-    
+
     loader_format = os.getenv("LOADER_FILE_FORMAT", "parquet")
 
     # Staging GCS optionnel : accélère le chargement si un bucket est configuré
@@ -241,12 +241,12 @@ def run_pipeline():
             staging=staging,
             progress="log",
         )
-        
+
         # Création de l'engine SQLAlchemy pour l'inspection et dlt
         # Augmentation substantielle du pool pour supporter le parallélisme dlt (surtout avec 300+ tables)
         # pool_size: connexions maintenues, max_overflow: connexions temporaires autorisées.
         engine = create_engine(
-            db_url, 
+            db_url,
             pool_pre_ping=True,
             pool_size=20,       # On s'aligne sur le parallélisme dlt
             max_overflow=30,    # Marge pour les pics de charge
@@ -267,7 +267,7 @@ def run_pipeline():
             logging.error(f"Erreur lors du parsing de TABLE_QUERIES: {e}")
 
         from sqlalchemy import text
-        
+
         # On normalise les clés en majuscules pour faciliter la comparaison avec Oracle (insensible à la casse)
         normalized_queries = {k.upper(): v for k, v in custom_tables.items()}
 
@@ -291,12 +291,12 @@ def run_pipeline():
         from sqlalchemy import inspect
         inspector = inspect(engine)
         all_db_tables = inspector.get_table_names(schema=db_schema)
-        
+
         discovery_selected = [n for n in all_db_tables if not n.upper().startswith("BIN$")]
-        
-        # Correction du mapping : on garde les noms originaux de la base source 
+
+        # Correction du mapping : on garde les noms originaux de la base source
         # (indispensable pour Oracle qui est sensible à la casse (majuscules)).
-        
+
         # Filtres inclusion/exclusion/prefix
         if tables_exclude:
             exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
@@ -319,18 +319,18 @@ def run_pipeline():
         # Chargement de la source SQL Database UNIQUEMENT pour les tables standards
         chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
         source = sql_database(
-            engine, 
-            schema=db_schema, 
+            engine,
+            schema=db_schema,
             chunk_size=chunk_size,
             table_names=final_discovery_names, # On limite la réflexion à ces tables uniquement
             table_adapter_callback=table_adapter_callback
         )
-        
+
         # On renomme la source pour forcer dlt à ignorer l'ancien schéma pollué
         # (dlt stocke le schéma par nom de source dans BigQuery)
         source = source.clone(with_name=f"source_{bq_dataset_id}")
 
-        # On définit ces ressources manuellement à partir du SQL pour éviter que dlt 
+        # On définit ces ressources manuellement à partir du SQL pour éviter que dlt
         # ne reflète les colonnes sensibles de la table Oracle d'origine.
         def make_manual_resource(name, sql, chunk_size):
             """Crée une ressource dlt manuelle sans aucune réflexion automatique."""
@@ -342,7 +342,7 @@ def run_pipeline():
                     result = conn.execution_options(yield_per=chunk_size).execute(text(sql))
                     for row in result:
                         yield dict(row._mapping)
-            
+
             return manual_resource_gen
 
         custom_resources = []
@@ -353,9 +353,9 @@ def run_pipeline():
         # On ajoute les ressources manuelles (propres) à la source dlt
         for res in custom_resources:
             source.resources[res.name] = res
-        
+
         selected = list(source.resources.keys())
-        
+
         # Utilisation du normaliseur natif de la source
         naming = source.schema.naming
 
@@ -375,13 +375,13 @@ def run_pipeline():
 
             # Recherche de config spécifique (insensible à la casse)
             config = table_configs.get(res_name.lower()) or {}
-            
+
             inc_col = normalize_col(config.get("incremental") or global_incremental_col)
             pk_col = normalize_col(config.get("primary_key") or global_primary_key)
             w_disp = config.get("write_disposition") or global_write_disposition
             partition_col = normalize_col(config.get("partition"))
             cluster_cols = normalize_col(config.get("cluster"))
-            
+
             # Inclusion de colonnes (liste blanche — prioritaire sur exclude)
             table_include = config.get("include") or []
             if isinstance(table_include, str):
@@ -420,7 +420,7 @@ def run_pipeline():
                 hints["primary_key"] = pk_col
             if w_disp:
                 hints["write_disposition"] = w_disp
-            
+
             # Exclusion de colonnes (données + schéma)
             if exclude_cols:
                 if isinstance(exclude_cols, str):
@@ -459,7 +459,7 @@ def run_pipeline():
                 if isinstance(cluster_cols, str):
                     cluster_cols = [cluster_cols]
                 adapter_kwargs["cluster"] = list(cluster_cols)
-            
+
             if adapter_kwargs:
                 bigquery_adapter(res, **adapter_kwargs)
                 logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")
@@ -468,10 +468,24 @@ def run_pipeline():
                 res.apply_hints(**hints)
                 logging.info(f"Configuration appliquée pour {res_name}: {hints}")
 
-            # Force la nullabilité sur TOUTES les colonnes du schéma dlt ---
-            # Cela couvre les colonnes reflétées, même si elles ne sont pas dans TABLE_QUERIES.
+            # Hints utilisateur par colonne (ex: data_type="wei" pour BIGNUMERIC,
+            # ou {"data_type": "decimal", "precision": 31, "scale": 2})
+            table_columns_raw = config.get("columns") or {}
+            table_columns = {
+                normalize_col(k): v for k, v in table_columns_raw.items()
+            }
+
+            # Force nullability sur TOUTES les colonnes + merge des hints utilisateur
             if res.columns:
                 force_null_hints = {c: {"nullable": True} for c in res.columns}
+                for col_name, col_hint in table_columns.items():
+                    if col_name in force_null_hints:
+                        force_null_hints[col_name].update(col_hint)
+                    else:
+                        logging.warning(
+                            f"Column hint ignoré pour {res_name}.{col_name} : "
+                            "colonne absente du schéma (peut-être exclue ou non réfléchie)"
+                        )
                 res.apply_hints(columns=force_null_hints)
                 logging.debug(f"Schéma : {len(force_null_hints)} colonnes forcées à NULLABLE pour {res_name}")
 
@@ -491,7 +505,7 @@ def run_pipeline():
             details = getattr(e, "details", None) or getattr(e, "message", None)
             if details:
                 error_msg += f"\nDétails: {details}"
-            
+
             print(error_msg)
             import traceback
             traceback.print_exc()
