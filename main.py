@@ -38,6 +38,7 @@ logging.captureWarnings(True)
 import oracledb
 oracledb.defaults.arraysize = 10000     # au lieu de 100
 oracledb.defaults.prefetchrows = 10000  # prefetch côté driver pour accélérer les gros chargements (surtout avec dlt qui traite par lots)
+oracledb.defaults.fetch_lobs = False    # CLOB → str, BLOB → bytes au fetch (sinon pyarrow crash sur les objets LOB)
 
 def date_out_converter(val):
     """Convertisseur pour les dates Oracle hors intervalle Python (ex: année -5579)"""
