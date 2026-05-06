@@ -152,7 +152,18 @@ Comportement de `columns` :
 | `SQL_CHUNK_SIZE` | Nombre de lignes par chunk d'extraction | `100000` |
 | `ENABLE_ORACLE_THICK_MODE` | Activer le mode Thick pour Oracle (requis pour DB < 12.1). | `false` |
 | `ORACLE_IC_PATH` | Chemin vers l'Instant Client Oracle (si requis et non dans le PATH). | (vide) |
+| `DROP_PENDING_PACKAGES` | Si `true`, supprime les pending packages DLT au démarrage (utile si le state est persisté via PVC et qu'un run précédent a crashé entre extract et load). À ne mettre que ponctuellement. | `false` |
 | `LOG_LEVEL` | Niveau de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`). | `INFO` |
+| `DB_POOL_SIZE` | Taille du pool SQLAlchemy (connexions maintenues). | `20` |
+| `DB_POOL_MAX_OVERFLOW` | Connexions temporaires autorisées au-delà de `DB_POOL_SIZE`. | `30` |
+| `DB_POOL_TIMEOUT` | Temps d'attente max (s) pour obtenir une connexion du pool. | `60` |
+| `DB_POOL_RECYCLE` | Délai (s) avant recyclage d'une connexion (évite les timeouts Oracle/PG). | `3600` |
+
+> [!NOTE]
+> **`DROP_PENDING_PACKAGES`** n'est utile que si le répertoire `~/.dlt` est persisté entre les runs (volume monté). Dans un Job Kubernetes éphémère sans PVC, les pending packages disparaissent avec le pod, l'option est sans effet pratique.
+
+> [!TIP]
+> **Pool de connexions et erreur `QueuePool limit reached`** : par défaut, le pool tient ~50 connexions (`DB_POOL_SIZE` + `DB_POOL_MAX_OVERFLOW`). Avec une base à plusieurs centaines de tables, la réflexion du schéma + l'extraction parallèle (`EXTRACT__WORKERS`, `EXTRACT__MAX_PARALLEL_ITEMS`) peuvent saturer le pool. Augmenter `DB_POOL_SIZE`/`DB_POOL_MAX_OVERFLOW` (et la limite `SESSIONS`/`PROCESSES` côté serveur si besoin), ou réduire `EXTRACT__MAX_PARALLEL_ITEMS` à une valeur ≤ `DB_POOL_SIZE`.
 
 ## Format des URL de connexion
 

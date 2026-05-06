@@ -243,17 +243,26 @@ def run_pipeline():
             progress="log",
         )
 
-        # Création de l'engine SQLAlchemy pour l'inspection et dlt
-        # Augmentation substantielle du pool pour supporter le parallélisme dlt (surtout avec 300+ tables)
-        # pool_size: connexions maintenues, max_overflow: connexions temporaires autorisées.
+        # Création de l'engine SQLAlchemy pour l'inspection et dlt.
+        # Pool configurable via variables d'env : à augmenter pour les bases avec
+        # beaucoup de tables (réflexion + extraction parallèle saturent vite un petit pool).
+        # Règle : DB_POOL_SIZE >= EXTRACT__MAX_PARALLEL_ITEMS (avec marge pour la réflexion).
+        pool_size = int(os.getenv("DB_POOL_SIZE", "20"))
+        max_overflow = int(os.getenv("DB_POOL_MAX_OVERFLOW", "30"))
+        pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "60"))
+        pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
+        logging.info(
+            f"Pool SQLAlchemy : size={pool_size}, max_overflow={max_overflow}, "
+            f"timeout={pool_timeout}s, recycle={pool_recycle}s"
+        )
         engine = create_engine(
             db_url,
             pool_pre_ping=True,
-            pool_size=20,       # On s'aligne sur le parallélisme dlt
-            max_overflow=30,    # Marge pour les pics de charge
-            pool_timeout=60,    # Temps d'attente max pour une connexion
-            pool_recycle=3600,  # Recycle les connexions pour éviter les timeouts (Oracle/Postgres)
-            echo=False          # Désactive le log SQL détaillé pour la prod
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+            pool_recycle=pool_recycle,
+            echo=False,
         )
 
 
@@ -495,6 +504,13 @@ def run_pipeline():
 
     # Exécution
         try:
+            # Nettoyage optionnel des pending packages laissés par un run précédent qui aurait
+            # crashé entre extract et load. Sans PVC monté sur ~/.dlt, les pending packages
+            # sont éphémères ; cette option est utile uniquement si le state DLT est persisté.
+            if os.getenv("DROP_PENDING_PACKAGES", "false").lower() == "true":
+                pipeline.drop_pending_packages()
+                logging.info("Pending packages supprimés (DROP_PENDING_PACKAGES=true).")
+
             logging.info("Exécution de la pipeline...")
             # On ne passe plus write_disposition globalement à run() car cela réinitialise l'état incrémental.
             # Le mode par défaut (replace) est déjà appliqué individuellement à chaque ressource via les hints
