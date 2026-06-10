@@ -83,6 +83,16 @@ Comportement de `columns` :
 - Les hints utilisateur sont fusionnés avec les hints internes de nullabilité (`nullable=true` forcé par défaut).
 - Si une colonne définie dans `columns` est absente du schéma (typo, colonne exclue, ou non réfléchie), un warning est loggé et la pipeline continue.
 
+#### Commentaires de colonnes (descriptions BigQuery)
+
+Les commentaires de colonnes de la base source sont automatiquement copiés vers les descriptions de colonnes BigQuery. Aucune configuration requise.
+
+- **Oracle** : lus depuis `ALL_COL_COMMENTS` (owner = `DB_SCHEMA`, ou l'utilisateur de session si non défini).
+- **PostgreSQL** : lus depuis `pg_description` (commentaires `COMMENT ON COLUMN`), pour le schéma `DB_SCHEMA` (ou `public`).
+- Non bloquant : si la récupération échoue, un warning est loggé et la pipeline continue sans descriptions.
+- Une `description` explicite définie dans `columns` (voir ci-dessus) est prioritaire sur le commentaire source.
+- S'applique uniquement aux tables réfléchies. Les tables avec un SQL personnalisé (`TABLE_QUERIES`) n'ont pas de descriptions auto.
+
 #### Mappings DLT vers BigQuery (utile pour `columns`)
 
 | `data_type` DLT | Type BigQuery | Notes |

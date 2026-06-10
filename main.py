@@ -378,10 +378,56 @@ def run_pipeline():
                 return [naming.normalize_identifier(c) for c in col]
             return col
 
+        # --- COMMENTAIRES DE COLONNES (descriptions vers BigQuery) ---
+        # Récupère les commentaires de colonnes côté source (Oracle ALL_COL_COMMENTS,
+        # PostgreSQL pg_description) et les expose comme "description" sur les colonnes BQ.
+        # Ignoré pour les autres bases. Non bloquant en cas d'échec.
+        col_comments: dict[str, dict[str, str]] = {}
+        db_url_lower = db_url.lower()
+        comment_rows = []
+        try:
+            if "oracle" in db_url_lower:
+                owner = (db_schema or "").strip().upper()
+                with engine.connect() as conn:
+                    if not owner:
+                        owner = conn.execute(text("SELECT USER FROM DUAL")).scalar()
+                    comment_rows = list(conn.execute(
+                        text(
+                            "SELECT TABLE_NAME, COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS "
+                            "WHERE OWNER = :owner AND COMMENTS IS NOT NULL "
+                            "AND SUBSTR(TABLE_NAME, 1, 4) != 'BIN$'"
+                        ),
+                        {"owner": owner},
+                    ).fetchall())
+            elif "postgres" in db_url_lower:
+                pg_schema = (db_schema or "public").strip()
+                with engine.connect() as conn:
+                    comment_rows = list(conn.execute(
+                        text(
+                            "SELECT c.table_name, c.column_name, pgd.description "
+                            "FROM information_schema.columns c "
+                            "JOIN pg_catalog.pg_statio_all_tables st "
+                            "  ON c.table_schema = st.schemaname AND c.table_name = st.relname "
+                            "JOIN pg_catalog.pg_description pgd "
+                            "  ON pgd.objoid = st.relid AND pgd.objsubid = c.ordinal_position "
+                            "WHERE c.table_schema = :schema AND pgd.description IS NOT NULL"
+                        ),
+                        {"schema": pg_schema},
+                    ).fetchall())
+            for t_name, c_name, comment in comment_rows:
+                t_key = naming.normalize_identifier(t_name)
+                c_key = naming.normalize_identifier(c_name)
+                col_comments.setdefault(t_key, {})[c_key] = comment
+            if col_comments:
+                logging.info(f"Commentaires de colonnes récupérés pour {len(col_comments)} tables.")
+        except Exception as e:
+            logging.warning(f"Récupération des commentaires de colonnes ignorée : {e}")
+
         # --- APPLICATION DES CONFIGURATIONS SPÉCIFIQUES (Incrémental, PK, Partitionnement) ---
         for res_name in selected:
             res = source.resources[res_name]
             t_name_upper = res_name.upper()
+            res_name_normalized = naming.normalize_identifier(res_name)
 
             # Recherche de config spécifique (insensible à la casse)
             config = table_configs.get(res_name.lower()) or {}
@@ -496,6 +542,10 @@ def run_pipeline():
                             f"Column hint ignoré pour {res_name}.{col_name} : "
                             "colonne absente du schéma (peut-être exclue ou non réfléchie)"
                         )
+                # Descriptions issues des commentaires source (un hint utilisateur explicite gagne)
+                for col_name, comment in col_comments.get(res_name_normalized, {}).items():
+                    if col_name in force_null_hints:
+                        force_null_hints[col_name].setdefault("description", comment)
                 res.apply_hints(columns=force_null_hints)
                 logging.debug(f"Schéma : {len(force_null_hints)} colonnes forcées à NULLABLE pour {res_name}")
 
