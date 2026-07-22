@@ -8,27 +8,44 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- CONFIGURATION LOGGING (DOIT ÊTRE FAIT EN PREMIER POUR LE TRACE CLIENT) ---
-log_format = os.getenv("LOG_FORMAT", "JSON").upper()
+# Défaut = TEXT : logs texte simples sur stdout, captés proprement par Cloud Logging
+# (GKE/Cloud Run) et donc visibles dans la console. L'ancien défaut JSON via
+# StructuredLogHandler était lossy sur GKE : logs DLT/applicatifs perdus ou mal
+# formés (le handler écrit sur stderr par défaut et pouvait être écrasé par dlt).
+log_format = os.getenv("LOG_FORMAT", "TEXT").upper()
 log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_name, logging.INFO)
+
+def _configure_text_logging():
+    # force=True : retire tout handler déjà posé (par dlt ou un import) afin d'éviter
+    # les doublons et de garantir que NOS logs partent bien sur stdout.
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+    os.environ["RUNTIME__LOG_FORMAT"] = "TEXT"
 
 if log_format == "JSON":
     try:
         from google.cloud.logging.handlers import StructuredLogHandler
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-        handler = StructuredLogHandler(project=project_id)
-        logging.getLogger().addHandler(handler)
-    except ImportError:
-        logging.basicConfig(level=log_level)
-    os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
+        # stream=stdout explicite (le défaut de StreamHandler est stderr) et handler
+        # UNIQUE sur le root -> JSON structuré propre, une ligne par enregistrement.
+        handler = StructuredLogHandler(stream=sys.stdout, project_id=project_id)
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        root.addHandler(handler)
+        os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
+    except Exception as e:
+        # Toute erreur (ImportError, signature, etc.) -> repli sur le texte plutôt
+        # que de perdre silencieusement les logs.
+        _configure_text_logging()
+        logging.warning(f"LOG_FORMAT=JSON indisponible, repli sur TEXT : {e}")
 else:
-    # Format texte standard pour environnement local
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        stream=sys.stdout
-    )
-    os.environ["RUNTIME__LOG_FORMAT"] = "TEXT"
+    _configure_text_logging()
 
 logging.getLogger().setLevel(log_level)
 os.environ["RUNTIME__LOG_LEVEL"] = log_level_name
