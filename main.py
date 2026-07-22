@@ -8,44 +8,27 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- CONFIGURATION LOGGING (DOIT ÊTRE FAIT EN PREMIER POUR LE TRACE CLIENT) ---
-# Défaut = TEXT : logs texte simples sur stdout, captés proprement par Cloud Logging
-# (GKE/Cloud Run) et donc visibles dans la console. L'ancien défaut JSON via
-# StructuredLogHandler était lossy sur GKE : logs DLT/applicatifs perdus ou mal
-# formés (le handler écrit sur stderr par défaut et pouvait être écrasé par dlt).
-log_format = os.getenv("LOG_FORMAT", "TEXT").upper()
+log_format = os.getenv("LOG_FORMAT", "JSON").upper()
 log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 log_level = getattr(logging, log_level_name, logging.INFO)
-
-def _configure_text_logging():
-    # force=True : retire tout handler déjà posé (par dlt ou un import) afin d'éviter
-    # les doublons et de garantir que NOS logs partent bien sur stdout.
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        stream=sys.stdout,
-        force=True,
-    )
-    os.environ["RUNTIME__LOG_FORMAT"] = "TEXT"
 
 if log_format == "JSON":
     try:
         from google.cloud.logging.handlers import StructuredLogHandler
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-        # stream=stdout explicite (le défaut de StreamHandler est stderr) et handler
-        # UNIQUE sur le root -> JSON structuré propre, une ligne par enregistrement.
-        handler = StructuredLogHandler(stream=sys.stdout, project_id=project_id)
-        root = logging.getLogger()
-        for h in list(root.handlers):
-            root.removeHandler(h)
-        root.addHandler(handler)
-        os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
-    except Exception as e:
-        # Toute erreur (ImportError, signature, etc.) -> repli sur le texte plutôt
-        # que de perdre silencieusement les logs.
-        _configure_text_logging()
-        logging.warning(f"LOG_FORMAT=JSON indisponible, repli sur TEXT : {e}")
+        handler = StructuredLogHandler(project=project_id)
+        logging.getLogger().addHandler(handler)
+    except ImportError:
+        logging.basicConfig(level=log_level)
+    os.environ["RUNTIME__LOG_FORMAT"] = "JSON"
 else:
-    _configure_text_logging()
+    # Format texte standard pour environnement local
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stdout
+    )
+    os.environ["RUNTIME__LOG_FORMAT"] = "TEXT"
 
 logging.getLogger().setLevel(log_level)
 os.environ["RUNTIME__LOG_LEVEL"] = log_level_name
@@ -250,15 +233,6 @@ def run_pipeline():
     default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
     pipeline_id = os.getenv("PIPELINE_NAME", default_pipeline_name)
 
-    # Collecteur de progression dlt. "log" redéverse toute la table de compteurs en
-    # bursts réguliers (des dizaines de lignes d'un coup). Sur GKE, l'agent Cloud
-    # Logging (rate limiter activé par défaut) throttle ce flot -> les logs du
-    # conteneur sont droppés et n'apparaissent plus dans la console (seul `kubectl
-    # logs`, qui lit le fichier brut, les montre). Défaut = None : dlt loggue quand
-    # même les jalons extract/normalize/load en INFO. PROGRESS=log pour réactiver le
-    # détail (local/debug).
-    progress = "log" if os.getenv("PROGRESS", "").strip().lower() == "log" else None
-
     try:
         logging.info("--- DÉMARRAGE DE LA PIPELINE (Debug Mode) ---")
         pipeline = dlt.pipeline(
@@ -266,7 +240,7 @@ def run_pipeline():
             destination=dlt.destinations.bigquery(**destination_params),
             dataset_name=bq_dataset_id,
             staging=staging,
-            progress=progress,
+            progress="log",
         )
 
         # Création de l'engine SQLAlchemy pour l'inspection et dlt.
