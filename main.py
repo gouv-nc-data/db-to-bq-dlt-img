@@ -250,6 +250,15 @@ def run_pipeline():
     default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
     pipeline_id = os.getenv("PIPELINE_NAME", default_pipeline_name)
 
+    # Collecteur de progression dlt. "log" redéverse toute la table de compteurs en
+    # bursts réguliers (des dizaines de lignes d'un coup). Sur GKE, l'agent Cloud
+    # Logging (rate limiter activé par défaut) throttle ce flot -> les logs du
+    # conteneur sont droppés et n'apparaissent plus dans la console (seul `kubectl
+    # logs`, qui lit le fichier brut, les montre). Défaut = None : dlt loggue quand
+    # même les jalons extract/normalize/load en INFO. PROGRESS=log pour réactiver le
+    # détail (local/debug).
+    progress = "log" if os.getenv("PROGRESS", "").strip().lower() == "log" else None
+
     try:
         logging.info("--- DÉMARRAGE DE LA PIPELINE (Debug Mode) ---")
         pipeline = dlt.pipeline(
@@ -257,7 +266,7 @@ def run_pipeline():
             destination=dlt.destinations.bigquery(**destination_params),
             dataset_name=bq_dataset_id,
             staging=staging,
-            progress="log",
+            progress=progress,
         )
 
         # Création de l'engine SQLAlchemy pour l'inspection et dlt.
