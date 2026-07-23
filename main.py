@@ -15,6 +15,7 @@ log_level = getattr(logging, log_level_name, logging.INFO)
 if log_format == "JSON":
     try:
         from google.cloud.logging.handlers import StructuredLogHandler
+
         project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
         handler = StructuredLogHandler(project=project_id)
         logging.getLogger().addHandler(handler)
@@ -26,7 +27,7 @@ else:
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        stream=sys.stdout
+        stream=sys.stdout,
     )
     os.environ["RUNTIME__LOG_FORMAT"] = "TEXT"
 
@@ -36,9 +37,13 @@ logging.captureWarnings(True)
 
 # --- MONKEY PATCH ORACLEDB (EMPECHE LES CRASH SUR DATES INVALIDES) ---
 import oracledb
-oracledb.defaults.arraysize = 10000     # au lieu de 100
+
+oracledb.defaults.arraysize = 10000  # au lieu de 100
 oracledb.defaults.prefetchrows = 10000  # prefetch côté driver pour accélérer les gros chargements (surtout avec dlt qui traite par lots)
-oracledb.defaults.fetch_lobs = False    # CLOB → str, BLOB → bytes au fetch (sinon pyarrow crash sur les objets LOB)
+oracledb.defaults.fetch_lobs = (
+    False  # CLOB → str, BLOB → bytes au fetch (sinon pyarrow crash sur les objets LOB)
+)
+
 
 def date_out_converter(val):
     """Convertisseur pour les dates Oracle hors intervalle Python (ex: année -5579)"""
@@ -48,19 +53,31 @@ def date_out_converter(val):
         # On vérifie l'année (4 premiers caractères) avant conversion
         year_str = val[:4]
         # Si l'année est négative ou hors intervalle [0001-9999]
-        if year_str.startswith('-') or int(year_str) < 1 or int(year_str) > 9999:
-            logging.error(f"!!! CRITICAL PATCH !!! Date Oracle invalide neutralisée : {val}")
+        if year_str.startswith("-") or int(year_str) < 1 or int(year_str) > 9999:
+            logging.error(
+                f"!!! CRITICAL PATCH !!! Date Oracle invalide neutralisée : {val}"
+            )
             return None
         # On retourne un objet datetime ISO-compatible
-        return datetime.datetime.fromisoformat(val.replace(' ', 'T'))
+        return datetime.datetime.fromisoformat(val.replace(" ", "T"))
     except Exception:
         return None
 
+
 def oracle_output_type_handler(cursor, metadata):
     """Handler global pour intercepter les types temporels et les traiter via date_out_converter"""
-    if metadata.type in (oracledb.DB_TYPE_DATE, oracledb.DB_TYPE_TIMESTAMP,
-                         oracledb.DB_TYPE_TIMESTAMP_TZ, oracledb.DB_TYPE_TIMESTAMP_LTZ):
-        return cursor.var(oracledb.DB_TYPE_VARCHAR, arraysize=cursor.arraysize, outconverter=date_out_converter)
+    if metadata.type in (
+        oracledb.DB_TYPE_DATE,
+        oracledb.DB_TYPE_TIMESTAMP,
+        oracledb.DB_TYPE_TIMESTAMP_TZ,
+        oracledb.DB_TYPE_TIMESTAMP_LTZ,
+    ):
+        return cursor.var(
+            oracledb.DB_TYPE_VARCHAR,
+            arraysize=cursor.arraysize,
+            outconverter=date_out_converter,
+        )
+
 
 def _apply_patch(conn):
     """Applique le handler sur une nouvelle connexion"""
@@ -68,16 +85,23 @@ def _apply_patch(conn):
         conn.outputtypehandler = oracle_output_type_handler
     return conn
 
+
 # Patche les points d'entrée de connexion pour garantir l'activation du handler
 _original_connect = oracledb.connect
+
+
 def _patched_connect(*args, **kwargs):
     return _apply_patch(_original_connect(*args, **kwargs))
+
+
 oracledb.connect = _patched_connect
 
 if hasattr(oracledb, "Connection"):
     _original_Connection = oracledb.Connection
+
     def _patched_Connection(*args, **kwargs):
         return _apply_patch(_original_Connection(*args, **kwargs))
+
     oracledb.Connection = _patched_Connection
 
 if hasattr(oracledb, "Connect"):
@@ -85,12 +109,12 @@ if hasattr(oracledb, "Connect"):
 
 # --- IMPORTS DLT & SQLALCHEMY ---
 import dlt
-from dlt.sources.sql_database import sql_database, sql_table
+from dlt.sources.sql_database import sql_database
 from dlt.destinations.adapters import bigquery_adapter
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 from dlt.destinations.impl.bigquery import sql_client as bq_sql_client
-from sqlalchemy import event, create_engine, text, inspect
-from sqlalchemy.engine import Engine, make_url
+from sqlalchemy import event, create_engine
+from sqlalchemy.engine import Engine
 from google.cloud import secretmanager
 
 # --- PATCH 1 : BIGQUERY TRUNCATE — ignore les tables utilisateur inexistantes ---
@@ -99,6 +123,7 @@ from google.cloud import secretmanager
 # le TRUNCATE échoue avec DatabaseUndefinedRelation. Ce patch l'intercepte table
 # par table et continue silencieusement : DLT créera la table lors du chargement.
 _original_truncate_tables = bq_sql_client.BigQuerySqlClient.truncate_tables
+
 
 def _safe_truncate_tables(self, *tables: str) -> None:
     for table in tables:
@@ -109,6 +134,7 @@ def _safe_truncate_tables(self, *tables: str) -> None:
                 f"Table '{table}' introuvable lors du TRUNCATE (mode replace) — "
                 "elle sera créée lors du chargement des données."
             )
+
 
 bq_sql_client.BigQuerySqlClient.truncate_tables = _safe_truncate_tables
 logging.info("Patch 1 actif : truncate_tables tolère les tables supprimées.")
@@ -139,6 +165,7 @@ if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
         logging.error(f"Erreur lors de l'activation du mode Oracle Thick: {e}")
         sys.exit(1)
 
+
 # Événements SQLAlchemy pour renforcer le réglage de session et le handler
 # Ces handlers sont limités aux connexions oracledb pour ne pas perturber PostgreSQL.
 @event.listens_for(Engine, "connect")
@@ -152,18 +179,24 @@ def set_oracle_params(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS'")
-        cursor.execute("ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6'")
+        cursor.execute(
+            "ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6'"
+        )
     except Exception:
         pass
     finally:
         cursor.close()
     _apply_patch(dbapi_connection)
 
+
 @event.listens_for(Engine, "before_cursor_execute")
 def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
     """Force l'installation du handler Oracle sur le curseur — ignoré si ce n'est pas oracledb."""
-    if hasattr(cursor, "outputtypehandler") and hasattr(getattr(cursor, "connection", None), "outputtypehandler"):
+    if hasattr(cursor, "outputtypehandler") and hasattr(
+        getattr(cursor, "connection", None), "outputtypehandler"
+    ):
         cursor.outputtypehandler = oracle_output_type_handler
+
 
 def run_pipeline():
     # Configuration BDD
@@ -175,10 +208,16 @@ def run_pipeline():
 
     # Injection automatique de disable_oob=true pour le mode Oracle Thin
     # Cela évite les lenteurs/blocages liés au "Out of Band" breaks, fréquents dans Docker/K8s
-    if "oracle" in db_url and "disable_oob=true" not in db_url and os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() != "true":
+    if (
+        "oracle" in db_url
+        and "disable_oob=true" not in db_url
+        and os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() != "true"
+    ):
         separator = "&" if "?" in db_url else "?"
         db_url = f"{db_url}{separator}disable_oob=true"
-        logging.info("Paramètre disable_oob=true ajouté à la chaîne de connexion (Mode Thin).")
+        logging.info(
+            "Paramètre disable_oob=true ajouté à la chaîne de connexion (Mode Thin)."
+        )
 
     # Configuration des variables d'environnement
     db_schema = os.getenv("DB_SCHEMA", "").strip() or None
@@ -198,7 +237,9 @@ def run_pipeline():
 
     # Exclusions globales appliquées à toutes les tables
     global_exclude_raw = os.getenv("GLOBAL_EXCLUDE", "").strip()
-    global_exclude_list = [t.strip() for t in global_exclude_raw.split(",")] if global_exclude_raw else []
+    global_exclude_list = (
+        [t.strip() for t in global_exclude_raw.split(",")] if global_exclude_raw else []
+    )
 
     # Configuration spécifique par table (JSON)
     table_configs_raw = os.getenv("TABLE_CONFIGS", "{}")
@@ -209,6 +250,17 @@ def run_pipeline():
     except json.JSONDecodeError as e:
         logging.error(f"Erreur lors du parsing de TABLE_CONFIGS: {e}")
         table_configs = {}
+
+    # --- CURSOR CALCULÉ (incremental_coalesce) ---
+    # Map table (clé minuscule) -> liste de colonnes source pour coalesce(col1, col2, ...).
+    # Sert de cursor "dernière touche" quand la date de modif n'est renseignée qu'en cas
+    # d'update (NULL sinon) : coalesce(date_maj, date_creation). Optionnel ; si une table
+    # n'y figure pas, son comportement est strictement inchangé.
+    coalesce_cursors = {
+        tname: cfg["incremental_coalesce"]
+        for tname, cfg in table_configs.items()
+        if isinstance(cfg, dict) and cfg.get("incremental_coalesce")
+    }
 
     if not secret_url or not bq_dataset_id:
         logging.error("DB_URL_SECRET et BQ_DATASET_ID sont requis.")
@@ -225,12 +277,14 @@ def run_pipeline():
 
     # Staging GCS optionnel : accélère le chargement si un bucket est configuré
     bucket_url = os.getenv("BUCKET_URL")
-    staging = 'filesystem' if bucket_url else None
+    staging = "filesystem" if bucket_url else None
     if bucket_url:
         logging.info(f"Staging GCS activé : {bucket_url} (Format: {loader_format})")
 
     # Nom du pipeline : auto-généré à partir du dataset pour isolation, ou via variable d'environnement
-    default_pipeline_name = f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
+    default_pipeline_name = (
+        f"db_to_bq_{bq_dataset_id}" if bq_dataset_id else "db_to_bq_generic"
+    )
     pipeline_id = os.getenv("PIPELINE_NAME", default_pipeline_name)
 
     try:
@@ -265,14 +319,15 @@ def run_pipeline():
             echo=False,
         )
 
-
         # --- LOGIQUE DE FILTRAGE ET REQUÊTES PERSONNALISÉES PAR INSTANCE ---
         custom_tables: dict[str, str] = {}
         table_queries_raw = os.getenv("TABLE_QUERIES", "{}")
         try:
             parsed_queries = json.loads(table_queries_raw)
             if isinstance(parsed_queries, dict):
-                custom_tables.update({str(k): str(v) for k, v in parsed_queries.items()})
+                custom_tables.update(
+                    {str(k): str(v) for k, v in parsed_queries.items()}
+                )
         except json.JSONDecodeError as e:
             logging.error(f"Erreur lors du parsing de TABLE_QUERIES: {e}")
 
@@ -290,19 +345,58 @@ def run_pipeline():
             try:
                 for col in table.columns:
                     col.nullable = True
-                logging.debug(f"Nullability : {len(table.columns)} colonnes forcées à NULLABLE pour {table.name} (via table_adapter)")
+                logging.debug(
+                    f"Nullability : {len(table.columns)} colonnes forcées à NULLABLE pour {table.name} (via table_adapter)"
+                )
             except Exception as e:
                 logging.debug(f"Info nullability (non critique) pour {table.name}: {e}")
+
+            # Colonne calculée pour incremental_coalesce : déclarée ici pour que dlt
+            # la type correctement. Le SELECT réel est injecté par query_adapter_callback.
+            if table.name.lower() in coalesce_cursors and "dlt_cursor" not in table.c:
+                table.append_column(
+                    Column("dlt_cursor", sqltypes.DateTime, nullable=True)
+                )
+
+        def query_adapter_callback(query, table, incremental=None, engine=None):
+            """Pour les tables en incremental_coalesce : ajoute coalesce(col1, col2, ...)
+            AS dlt_cursor et filtre côté serveur (WHERE coalesce(...) > start_value).
+            Les autres tables ne sont pas touchées (query renvoyée telle quelle)."""
+            cols = coalesce_cursors.get(table.name.lower())
+            if not cols:
+                return query
+            # Résolution insensible à la casse vers les noms de colonnes réels (Oracle = MAJ).
+            by_lower = {
+                c.name.lower(): c.name
+                for c in table.columns
+                if c.name.lower() != "dlt_cursor"
+            }
+            resolved = [by_lower[c.lower()] for c in cols if c.lower() in by_lower]
+            if not resolved:
+                logging.warning(
+                    f"incremental_coalesce ignoré pour {table.name} : colonnes {cols} introuvables."
+                )
+                return query
+            expr = "coalesce(" + ", ".join(resolved) + ")"
+            base = f"SELECT src.*, {expr} AS dlt_cursor FROM {table.fullname} src"
+            if incremental is not None and incremental.start_value is not None:
+                return text(f"{base} WHERE {expr} > :start_value").bindparams(
+                    start_value=incremental.start_value
+                )
+            return text(base)
 
         # Chargement de la source SQL Database avec le callback d'adaptation
         # --- SÉLECTION DES TABLES STANDARDS (Discovery) ---
         # On utilise l'inspecteur SQLAlchemy pour lister les tables AVANT d'initialiser dlt.
         # Cela permet d'empêcher dlt de refléter des tables que l'on va traiter manuellement.
         from sqlalchemy import inspect
+
         inspector = inspect(engine)
         all_db_tables = inspector.get_table_names(schema=db_schema)
 
-        discovery_selected = [n for n in all_db_tables if not n.upper().startswith("BIN$")]
+        discovery_selected = [
+            n for n in all_db_tables if not n.upper().startswith("BIN$")
+        ]
 
         # Correction du mapping : on garde les noms originaux de la base source
         # (indispensable pour Oracle qui est sensible à la casse (majuscules)).
@@ -310,21 +404,31 @@ def run_pipeline():
         # Filtres inclusion/exclusion/prefix
         if tables_exclude:
             exclude_list = [t.strip().lower() for t in tables_exclude.split(",")]
-            discovery_selected = [n for n in discovery_selected if n.lower() not in exclude_list]
+            discovery_selected = [
+                n for n in discovery_selected if n.lower() not in exclude_list
+            ]
 
         if tables_include:
             include_list = [t.strip().lower() for t in tables_include.split(",")]
-            discovery_selected = [n for n in discovery_selected if n.lower() in include_list]
+            discovery_selected = [
+                n for n in discovery_selected if n.lower() in include_list
+            ]
 
         if tables_prefix:
             prefix = tables_prefix.strip().lower()
-            discovery_selected = [n for n in discovery_selected if n.lower().startswith(prefix)]
+            discovery_selected = [
+                n for n in discovery_selected if n.lower().startswith(prefix)
+            ]
 
         # On EXCLUT les tables qui ont un SQL personnalisé de la découverte automatique
         # pour éviter toute réflexion de colonnes indésirables par dlt.
-        final_discovery_names = [n for n in discovery_selected if n.upper() not in normalized_queries]
+        final_discovery_names = [
+            n for n in discovery_selected if n.upper() not in normalized_queries
+        ]
 
-        logging.info(f"Tables sélectionnées pour la découverte automatique : {final_discovery_names}")
+        logging.info(
+            f"Tables sélectionnées pour la découverte automatique : {final_discovery_names}"
+        )
 
         # Chargement de la source SQL Database UNIQUEMENT pour les tables standards
         chunk_size = int(os.getenv("SQL_CHUNK_SIZE", "100000"))
@@ -332,8 +436,9 @@ def run_pipeline():
             engine,
             schema=db_schema,
             chunk_size=chunk_size,
-            table_names=final_discovery_names, # On limite la réflexion à ces tables uniquement
-            table_adapter_callback=table_adapter_callback
+            table_names=final_discovery_names,  # On limite la réflexion à ces tables uniquement
+            table_adapter_callback=table_adapter_callback,
+            query_adapter_callback=query_adapter_callback,
         )
 
         # On renomme la source pour forcer dlt à ignorer l'ancien schéma pollué
@@ -344,12 +449,15 @@ def run_pipeline():
         # ne reflète les colonnes sensibles de la table Oracle d'origine.
         def make_manual_resource(name, sql, chunk_size):
             """Crée une ressource dlt manuelle sans aucune réflexion automatique."""
+
             @dlt.resource(name=name, write_disposition=global_write_disposition)
             def manual_resource_gen():
                 # On utilise engine.connect() directement pour plus de légèreté
                 with engine.connect() as conn:
                     # stream_results=True (si supporté) aide à la mémoire
-                    result = conn.execution_options(yield_per=chunk_size).execute(text(sql))
+                    result = conn.execution_options(yield_per=chunk_size).execute(
+                        text(sql)
+                    )
                     for row in result:
                         yield dict(row._mapping)
 
@@ -358,7 +466,9 @@ def run_pipeline():
         custom_resources = []
         for t_name, custom_sql in custom_tables.items():
             logging.info(f"Préparation de la ressource manuelle : {t_name}")
-            custom_resources.append(make_manual_resource(t_name, custom_sql, chunk_size))
+            custom_resources.append(
+                make_manual_resource(t_name, custom_sql, chunk_size)
+            )
 
         # On ajoute les ressources manuelles (propres) à la source dlt
         for res in custom_resources:
@@ -391,35 +501,41 @@ def run_pipeline():
                 with engine.connect() as conn:
                     if not owner:
                         owner = conn.execute(text("SELECT USER FROM DUAL")).scalar()
-                    comment_rows = list(conn.execute(
-                        text(
-                            "SELECT TABLE_NAME, COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS "
-                            "WHERE OWNER = :owner AND COMMENTS IS NOT NULL "
-                            "AND SUBSTR(TABLE_NAME, 1, 4) != 'BIN$'"
-                        ),
-                        {"owner": owner},
-                    ).fetchall())
+                    comment_rows = list(
+                        conn.execute(
+                            text(
+                                "SELECT TABLE_NAME, COLUMN_NAME, COMMENTS FROM ALL_COL_COMMENTS "
+                                "WHERE OWNER = :owner AND COMMENTS IS NOT NULL "
+                                "AND SUBSTR(TABLE_NAME, 1, 4) != 'BIN$'"
+                            ),
+                            {"owner": owner},
+                        ).fetchall()
+                    )
             elif "postgres" in db_url_lower:
                 pg_schema = (db_schema or "public").strip()
                 with engine.connect() as conn:
-                    comment_rows = list(conn.execute(
-                        text(
-                            "SELECT c.table_name, c.column_name, pgd.description "
-                            "FROM information_schema.columns c "
-                            "JOIN pg_catalog.pg_statio_all_tables st "
-                            "  ON c.table_schema = st.schemaname AND c.table_name = st.relname "
-                            "JOIN pg_catalog.pg_description pgd "
-                            "  ON pgd.objoid = st.relid AND pgd.objsubid = c.ordinal_position "
-                            "WHERE c.table_schema = :schema AND pgd.description IS NOT NULL"
-                        ),
-                        {"schema": pg_schema},
-                    ).fetchall())
+                    comment_rows = list(
+                        conn.execute(
+                            text(
+                                "SELECT c.table_name, c.column_name, pgd.description "
+                                "FROM information_schema.columns c "
+                                "JOIN pg_catalog.pg_statio_all_tables st "
+                                "  ON c.table_schema = st.schemaname AND c.table_name = st.relname "
+                                "JOIN pg_catalog.pg_description pgd "
+                                "  ON pgd.objoid = st.relid AND pgd.objsubid = c.ordinal_position "
+                                "WHERE c.table_schema = :schema AND pgd.description IS NOT NULL"
+                            ),
+                            {"schema": pg_schema},
+                        ).fetchall()
+                    )
             for t_name, c_name, comment in comment_rows:
                 t_key = naming.normalize_identifier(t_name)
                 c_key = naming.normalize_identifier(c_name)
                 col_comments.setdefault(t_key, {})[c_key] = comment
             if col_comments:
-                logging.info(f"Commentaires de colonnes récupérés pour {len(col_comments)} tables.")
+                logging.info(
+                    f"Commentaires de colonnes récupérés pour {len(col_comments)} tables."
+                )
         except Exception as e:
             logging.warning(f"Récupération des commentaires de colonnes ignorée : {e}")
 
@@ -437,6 +553,23 @@ def run_pipeline():
             w_disp = config.get("write_disposition") or global_write_disposition
             partition_col = normalize_col(config.get("partition"))
             cluster_cols = normalize_col(config.get("cluster"))
+
+            # Cursor calculé : coalesce(col1, col2, ...) exposé en dlt_cursor par
+            # query_adapter_callback. Capte inserts ET updates en un seul passage.
+            if config.get("incremental_coalesce"):
+                if config.get("incremental"):
+                    logging.error(
+                        f"{res_name} : 'incremental' et 'incremental_coalesce' sont mutuellement exclusifs."
+                    )
+                    sys.exit(1)
+                if not pk_col:
+                    logging.error(
+                        f"{res_name} : 'incremental_coalesce' exige 'primary_key' (merge sur la PK)."
+                    )
+                    sys.exit(1)
+                inc_col = "dlt_cursor"
+                if not config.get("write_disposition"):
+                    w_disp = "merge"
 
             # Inclusion de colonnes (liste blanche — prioritaire sur exclude)
             table_include = config.get("include") or []
@@ -460,18 +593,24 @@ def run_pipeline():
                     all_cols = list(res.columns.keys())
                     derived_exclude = [c for c in all_cols if c not in include_cols]
                     exclude_cols = derived_exclude
-                    logging.info(f"Inclusion de colonnes pour {res_name} : {include_cols} → {len(derived_exclude)} colonnes exclues")
+                    logging.info(
+                        f"Inclusion de colonnes pour {res_name} : {include_cols} → {len(derived_exclude)} colonnes exclues"
+                    )
                 else:
                     logging.warning(
                         f"'include' ignoré pour {res_name} : schéma non disponible "
                         "(ressource manuelle via TABLE_QUERIES — filtrer directement dans le SQL)."
                     )
 
-            cursor_missing = config.get("on_cursor_value_missing", global_cursor_missing)
+            cursor_missing = config.get(
+                "on_cursor_value_missing", global_cursor_missing
+            )
 
             hints = {}
             if inc_col:
-                hints["incremental"] = dlt.sources.incremental(inc_col, on_cursor_value_missing=cursor_missing)
+                hints["incremental"] = dlt.sources.incremental(
+                    inc_col, on_cursor_value_missing=cursor_missing
+                )
             if pk_col:
                 hints["primary_key"] = pk_col
             if w_disp:
@@ -482,19 +621,25 @@ def run_pipeline():
                 if isinstance(exclude_cols, str):
                     exclude_cols = [exclude_cols]
                 cols_to_skip = list(exclude_cols)
+
                 # Filtre les données (bug closure corrigé via arg par défaut)
                 # Gère les deux modes DLT : dict (json) et pyarrow.Table (parquet/arrow)
                 def _make_col_filter(skip_cols: list):
                     skip_set = set(skip_cols)
+
                     def _filter(item, meta=None):
                         if item is None:
                             return None
-                        if hasattr(item, 'column_names'):
+                        if hasattr(item, "column_names"):
                             # Mode parquet/arrow : item est un pyarrow.Table
-                            cols_to_keep = [c for c in item.column_names if c not in skip_set]
+                            cols_to_keep = [
+                                c for c in item.column_names if c not in skip_set
+                            ]
                             return item.select(cols_to_keep)
                         return {k: v for k, v in item.items() if k not in skip_set}
+
                     return _filter
+
                 res.add_map(_make_col_filter(cols_to_skip))
 
                 # Supprime les colonnes du schéma DLT pour qu'elles n'apparaissent pas dans BQ
@@ -503,8 +648,9 @@ def run_pipeline():
                         del res.columns[col]
                     except (KeyError, TypeError):
                         pass
-                logging.info(f"Colonnes exclues (données + schéma) pour {res_name} : {cols_to_skip}")
-
+                logging.info(
+                    f"Colonnes exclues (données + schéma) pour {res_name} : {cols_to_skip}"
+                )
 
             # Partitionnement et clustering BigQuery via l'adapter dédié
             # Cela empêche l'auto-partitionnement de DLT et donne un contrôle explicite
@@ -518,7 +664,9 @@ def run_pipeline():
 
             if adapter_kwargs:
                 bigquery_adapter(res, **adapter_kwargs)
-                logging.info(f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}")
+                logging.info(
+                    f"BigQuery adapter appliqué pour {res_name}: {adapter_kwargs}"
+                )
 
             if hints:
                 res.apply_hints(**hints)
@@ -527,9 +675,7 @@ def run_pipeline():
             # Hints utilisateur par colonne (ex: data_type="wei" pour BIGNUMERIC,
             # ou {"data_type": "decimal", "precision": 31, "scale": 2})
             table_columns_raw = config.get("columns") or {}
-            table_columns = {
-                normalize_col(k): v for k, v in table_columns_raw.items()
-            }
+            table_columns = {normalize_col(k): v for k, v in table_columns_raw.items()}
 
             # Force nullability sur TOUTES les colonnes + merge des hints utilisateur
             if res.columns:
@@ -543,16 +689,19 @@ def run_pipeline():
                             "colonne absente du schéma (peut-être exclue ou non réfléchie)"
                         )
                 # Descriptions issues des commentaires source (un hint utilisateur explicite gagne)
-                for col_name, comment in col_comments.get(res_name_normalized, {}).items():
+                for col_name, comment in col_comments.get(
+                    res_name_normalized, {}
+                ).items():
                     if col_name in force_null_hints:
                         force_null_hints[col_name].setdefault("description", comment)
                 res.apply_hints(columns=force_null_hints)
-                logging.debug(f"Schéma : {len(force_null_hints)} colonnes forcées à NULLABLE pour {res_name}")
-
+                logging.debug(
+                    f"Schéma : {len(force_null_hints)} colonnes forcées à NULLABLE pour {res_name}"
+                )
 
         logging.info(f"Ressources prêtes pour le transfert : {selected}")
 
-    # Exécution
+        # Exécution
         try:
             # Nettoyage optionnel des pending packages laissés par un run précédent qui aurait
             # crashé entre extract et load. Sans PVC monté sur ~/.dlt, les pending packages
@@ -575,22 +724,27 @@ def run_pipeline():
 
             print(error_msg)
             import traceback
+
             traceback.print_exc()
             with open("/tmp/error_trace.log", "w") as f:
                 f.write(error_msg + "\n")
                 f.write(traceback.format_exc())
-            logging.error(f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True)
+            logging.error(
+                f"Erreur lors de l'exécution de la pipeline: {e}", exc_info=True
+            )
             sys.exit(1)
     except Exception as e:
         error_msg = f"!!! CRASH GLOBAL (run_pipeline) !!! : {str(e)}"
         print(error_msg)
         import traceback
+
         traceback.print_exc()
         with open("/tmp/error_trace_global.log", "w") as f:
             f.write(error_msg + "\n")
             f.write(traceback.format_exc())
         logging.error(f"Erreur globale dans run_pipeline: {e}", exc_info=True)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     run_pipeline()
