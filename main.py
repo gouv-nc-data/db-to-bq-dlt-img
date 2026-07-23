@@ -113,8 +113,9 @@ from dlt.sources.sql_database import sql_database
 from dlt.destinations.adapters import bigquery_adapter
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 from dlt.destinations.impl.bigquery import sql_client as bq_sql_client
-from sqlalchemy import event, create_engine
+from sqlalchemy import event, create_engine, Column
 from sqlalchemy.engine import Engine
+from sqlalchemy.sql import sqltypes
 from google.cloud import secretmanager
 
 # --- PATCH 1 : BIGQUERY TRUNCATE — ignore les tables utilisateur inexistantes ---
