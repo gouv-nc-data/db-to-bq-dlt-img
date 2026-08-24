@@ -235,6 +235,9 @@ def run_pipeline():
     global_primary_key = os.getenv("PRIMARY_KEY")
     global_write_disposition = os.getenv("WRITE_DISPOSITION", "replace")
     global_cursor_missing = os.getenv("ON_CURSOR_VALUE_MISSING", "include")
+    # Fenêtre de rattrapage du curseur incrémental, en JOURS (défaut : aucune).
+    # Surchargeable par table via `incremental_lag_days` dans TABLE_CONFIGS.
+    global_incremental_lag_days = os.getenv("INCREMENTAL_LAG_DAYS")
 
     # Exclusions globales appliquées à toutes les tables
     global_exclude_raw = os.getenv("GLOBAL_EXCLUDE", "").strip()
@@ -361,8 +364,20 @@ def run_pipeline():
 
         def query_adapter_callback(query, table, incremental=None, engine=None):
             """Pour les tables en incremental_coalesce : ajoute coalesce(col1, col2, ...)
-            AS dlt_cursor et filtre côté serveur (WHERE coalesce(...) > start_value).
-            Les autres tables ne sont pas touchées (query renvoyée telle quelle)."""
+            AS dlt_cursor et filtre côté serveur (WHERE coalesce(...) >= start_value).
+            Les autres tables ne sont pas touchées (query renvoyée telle quelle).
+
+            La borne est INCLUSIVE, pour coller au `range_start="closed"` que dlt
+            applique par défaut côté client : dlt attend de recevoir les lignes
+            égales à la borne et les déduplique via `unique_hashes`. Un `>` strict
+            court-circuitait ce mécanisme et perdait DÉFINITIVEMENT toute ligne
+            portant la valeur exacte du curseur (le last_value ne redescend jamais).
+            Cas réel : curseur `coalesce(DAT_PAIE, DAT_MDT, DAT_MAJ)` sur SURFI.FAC_ENG,
+            tronqué au jour => 605 lignes de paiement perdues en 5 jours ouvrés.
+
+            `incremental.start_value` est déjà décalé du `lag` éventuel (dlt l'applique
+            dans bind() via apply_lag_with_suppression) : le filtre serveur hérite donc
+            automatiquement de la fenêtre, sans recalcul ici."""
             cols = coalesce_cursors.get(table.name.lower())
             if not cols:
                 return query
@@ -381,7 +396,7 @@ def run_pipeline():
             expr = "coalesce(" + ", ".join(resolved) + ")"
             base = f"SELECT src.*, {expr} AS dlt_cursor FROM {table.fullname} src"
             if incremental is not None and incremental.start_value is not None:
-                return text(f"{base} WHERE {expr} > :start_value").bindparams(
+                return text(f"{base} WHERE {expr} >= :start_value").bindparams(
                     start_value=incremental.start_value
                 )
             return text(base)
@@ -572,6 +587,53 @@ def run_pipeline():
                 if not config.get("write_disposition"):
                     w_disp = "merge"
 
+            # --- LAG (fenêtre de rattrapage) ---
+            # Un curseur assis sur une date MÉTIER (date de paiement, de mandat...)
+            # n'est pas un horodatage de modification : la valeur peut être écrite
+            # en base plusieurs jours après la date qu'elle porte, voire être dans
+            # le futur (date de valeur). Comme `last_value` ne redescend jamais, ces
+            # lignes passent sous la borne et sont perdues définitivement.
+            # `lag` fait repartir le filtre de last_value - N, côté client ET côté
+            # serveur (start_value est déjà décalé par dlt dans bind()).
+            # Mesuré sur SURFI.FAC_ENG : le curseur a sauté au lundi 24/08 dès le
+            # run du samedi 22/08 (mandats en date de valeur), gelant la table.
+            # Unité dlt : SECONDES pour un curseur datetime, jours pour une date
+            # pure (cf. dlt/extract/incremental/lag.py) — nos curseurs remontent
+            # d'Oracle en datetime, d'où la conversion en secondes.
+            lag_days_raw = config.get("incremental_lag_days")
+            if lag_days_raw is None:
+                lag_days_raw = global_incremental_lag_days
+            inc_lag_seconds = None
+            if lag_days_raw is not None and inc_col:
+                try:
+                    lag_days = float(lag_days_raw)
+                except (TypeError, ValueError):
+                    logging.error(
+                        f"{res_name} : 'incremental_lag_days' doit être un nombre "
+                        f"(reçu {lag_days_raw!r})."
+                    )
+                    sys.exit(1)
+                if lag_days < 0:
+                    logging.error(
+                        f"{res_name} : 'incremental_lag_days' doit être positif."
+                    )
+                    sys.exit(1)
+                if lag_days > 0:
+                    # En dehors du merge, relire une fenêtre passée duplique les
+                    # lignes (append) ou remplace la table par le seul delta (replace).
+                    if w_disp != "merge" or not pk_col:
+                        logging.error(
+                            f"{res_name} : 'incremental_lag_days' exige "
+                            f"write_disposition='merge' + 'primary_key' "
+                            f"(actuel : {w_disp!r}, pk={pk_col!r}) — sinon doublons."
+                        )
+                        sys.exit(1)
+                    inc_lag_seconds = lag_days * 86400
+                    logging.info(
+                        f"{res_name} : lag incrémental de {lag_days:g} jour(s) "
+                        f"({inc_lag_seconds:.0f}s) sur le curseur {inc_col}."
+                    )
+
             # Inclusion de colonnes (liste blanche — prioritaire sur exclude)
             table_include = config.get("include") or []
             if isinstance(table_include, str):
@@ -610,7 +672,9 @@ def run_pipeline():
             hints = {}
             if inc_col:
                 hints["incremental"] = dlt.sources.incremental(
-                    inc_col, on_cursor_value_missing=cursor_missing
+                    inc_col,
+                    on_cursor_value_missing=cursor_missing,
+                    lag=inc_lag_seconds,
                 )
             if pk_col:
                 hints["primary_key"] = pk_col
