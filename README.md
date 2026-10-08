@@ -180,6 +180,7 @@ Les commentaires de colonnes de la base source sont automatiquement copiés vers
 Les secrets doivent contenir des URL au format SQLAlchemy :
 
 - **PostgreSQL** : `postgresql://user:password@host:port/dbname`
+- **MySQL** : `mysql+pymysql://user:password@host:port/dbname` (`mysql://` est réécrit en `mysql+pymysql://`). Pas de récupération des commentaires de colonnes.
 - **Oracle** : `oracle+oracledb://user:password@host:port/?service_name=service` (le driver `python-oracledb` est utilisé en mode thin).
 
 ## Déploiement
