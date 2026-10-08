@@ -173,6 +173,10 @@ def run_pipeline():
     response = client.access_secret_version(request={"name": secret_url})
     db_url = response.payload.data.decode("UTF-8").strip()
 
+    # MySQL : "mysql://" pointe par défaut sur mysqlclient (non installé) -> forcer pymysql
+    if db_url.startswith("mysql://"):
+        db_url = "mysql+pymysql://" + db_url[len("mysql://"):]
+
     # Injection automatique de disable_oob=true pour le mode Oracle Thin
     # Cela évite les lenteurs/blocages liés au "Out of Band" breaks, fréquents dans Docker/K8s
     if "oracle" in db_url and "disable_oob=true" not in db_url and os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() != "true":
