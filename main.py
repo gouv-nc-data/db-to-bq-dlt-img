@@ -199,6 +199,27 @@ def before_cursor_execute(conn, cursor, statement, parameters, context, executem
         cursor.outputtypehandler = oracle_output_type_handler
 
 
+def mysql_conversions():
+    """Convertisseurs pymysql : dates invalides (0000-00-00, 30 février...) -> NULL.
+
+    pymysql renvoie la chaîne brute quand il ne sait pas parser une date, ce qui fait
+    planter la conversion Arrow d'une colonne typée timestamp/date.
+    """
+    from pymysql.constants import FIELD_TYPE
+    from pymysql.converters import conversions
+
+    def _none_if_str(convert):
+        def wrapper(value):
+            result = convert(value)
+            return None if isinstance(result, str) else result
+        return wrapper
+
+    conv = conversions.copy()
+    for field_type in (FIELD_TYPE.DATE, FIELD_TYPE.DATETIME, FIELD_TYPE.TIMESTAMP):
+        conv[field_type] = _none_if_str(conv[field_type])
+    return conv
+
+
 def run_pipeline():
     # Configuration BDD
     secret_url = os.environ.get("DB_URL_SECRET")
@@ -324,6 +345,7 @@ def run_pipeline():
             max_overflow=max_overflow,
             pool_timeout=pool_timeout,
             pool_recycle=pool_recycle,
+            connect_args={"conv": mysql_conversions()} if db_url.startswith("mysql") else {},
             echo=False,
         )
 
