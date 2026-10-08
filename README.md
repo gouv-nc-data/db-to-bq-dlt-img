@@ -74,6 +74,7 @@ Clés supportées par table dans `TABLE_CONFIGS` :
 
 - `incremental`, `primary_key`, `write_disposition`, `partition`, `cluster`
 - `include`, `exclude`, `on_cursor_value_missing`
+- `incremental_batch_rows` : nombre approximatif de lignes chargées par run. Le lot s'arrête avant la valeur de curseur de la N-ième ligne (jamais au milieu d'une valeur). Exige `incremental`. Sert au premier chargement d'une grosse table quand le serveur source coupe les requêtes longues : l'état avance d'un lot à chaque run. Le lot doit dépasser le nombre de lignes partageant une même valeur de curseur, sinon il est vide et la table n'avance plus.
 - `columns` : hints DLT par colonne (ex: `data_type`, `precision`, `scale`, `nullable`, etc.)
 
 Comportement de `columns` :

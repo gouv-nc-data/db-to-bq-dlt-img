@@ -291,6 +291,16 @@ def run_pipeline():
         if isinstance(cfg, dict) and cfg.get("incremental_coalesce")
     }
 
+    # --- LOTS INCRÉMENTAUX (incremental_batch_rows) ---
+    # Map table (clé minuscule) -> nombre max de lignes par run. Ajoute ORDER BY curseur
+    # + LIMIT à la requête : le premier chargement d'une grosse table se fait en plusieurs
+    # runs, chacun sous les limites de durée de requête du serveur source.
+    batch_rows = {
+        tname: int(cfg["incremental_batch_rows"])
+        for tname, cfg in table_configs.items()
+        if isinstance(cfg, dict) and cfg.get("incremental_batch_rows")
+    }
+
     if not secret_url or not bq_dataset_id:
         logging.error("DB_URL_SECRET et BQ_DATASET_ID sont requis.")
         sys.exit(1)
@@ -404,6 +414,24 @@ def run_pipeline():
             `incremental.start_value` est déjà décalé du `lag` éventuel (dlt l'applique
             dans bind() via apply_lag_with_suppression) : le filtre serveur hérite donc
             automatiquement de la fenêtre, sans recalcul ici."""
+            limit = batch_rows.get(table.name.lower())
+            if limit and incremental is not None:
+                # Le lot s'arrête AVANT la valeur de curseur de la N-ième ligne
+                # (`cursor < cutoff`), jamais au milieu d'une valeur : sans clé primaire,
+                # dlt désactive la déduplication à la borne et filtre `> last_value`
+                # côté client, ce qui perdrait les lignes à égalité restées hors du lot.
+                # Le lot doit donc dépasser le nombre de lignes par valeur de curseur.
+                col = table.c[incremental.cursor_path]
+                cutoff_query = (
+                    query.with_only_columns(col).order_by(col).offset(limit).limit(1)
+                )
+                with engine.connect() as conn:
+                    cutoff = conn.execute(cutoff_query).scalar()
+                logging.info(
+                    f"{table.name} : lot incrémental de {limit} lignes, "
+                    f"{incremental.cursor_path} < {cutoff}"
+                )
+                return query if cutoff is None else query.where(col < cutoff)
             cols = coalesce_cursors.get(table.name.lower())
             if not cols:
                 return query
@@ -612,6 +640,13 @@ def run_pipeline():
                 inc_col = "dlt_cursor"
                 if not config.get("write_disposition"):
                     w_disp = "merge"
+
+            if config.get("incremental_batch_rows") and not config.get("incremental"):
+                logging.error(
+                    f"{res_name} : 'incremental_batch_rows' exige 'incremental' "
+                    "(incompatible avec 'incremental_coalesce')."
+                )
+                sys.exit(1)
 
             # --- LAG (fenêtre de rattrapage) ---
             # Un curseur assis sur une date MÉTIER (date de paiement, de mandat...)
