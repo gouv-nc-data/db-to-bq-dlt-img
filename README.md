@@ -181,7 +181,7 @@ Les commentaires de colonnes de la base source sont automatiquement copiés vers
 Les secrets doivent contenir des URL au format SQLAlchemy :
 
 - **PostgreSQL** : `postgresql://user:password@host:port/dbname`
-- **MySQL** : `mysql+pymysql://user:password@host:port/dbname` (`mysql://` est réécrit en `mysql+pymysql://`). Les dates invalides (`0000-00-00`...) sont chargées à `NULL`. Pas de récupération des commentaires de colonnes.
+- **MySQL** : `mysql+pymysql://user:password@host:port/dbname` (`mysql://` est réécrit en `mysql+pymysql://`). Les dates invalides (`0000-00-00`...) sont chargées à `NULL`. Les colonnes `FLOAT` sont lues en `DOUBLE` (`col + 0e0`) : sinon MySQL les renvoie arrondies à 6 chiffres significatifs. Pas de récupération des commentaires de colonnes.
 - **Oracle** : `oracle+oracledb://user:password@host:port/?service_name=service` (le driver `python-oracledb` est utilisé en mode thin).
 
 ## Déploiement
