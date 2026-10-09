@@ -113,7 +113,8 @@ from dlt.sources.sql_database import sql_database
 from dlt.destinations.adapters import bigquery_adapter
 from dlt.destinations.exceptions import DatabaseUndefinedRelation
 from dlt.destinations.impl.bigquery import sql_client as bq_sql_client
-from sqlalchemy import event, create_engine, Column
+from sqlalchemy import event, create_engine, Column, literal_column
+from sqlalchemy.dialects import mysql
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import sqltypes
 from google.cloud import secretmanager
@@ -414,6 +415,21 @@ def run_pipeline():
             `incremental.start_value` est déjà décalé du `lag` éventuel (dlt l'applique
             dans bind() via apply_lag_with_suppression) : le filtre serveur hérite donc
             automatiquement de la fenêtre, sans recalcul ici."""
+            # MySQL : une colonne FLOAT (4 octets) est renvoyée en texte arrondie à
+            # 6 chiffres significatifs (156.4858 et 156.4859 -> 156.486). `col + 0e0`
+            # la fait passer en DOUBLE côté serveur : valeur stockée exacte.
+            if hasattr(query, "selected_columns") and any(
+                isinstance(c.type, mysql.FLOAT) for c in query.selected_columns
+            ):
+                query = query.with_only_columns(
+                    *[
+                        (c + literal_column("0e0")).label(c.name)
+                        if isinstance(c.type, mysql.FLOAT)
+                        else c
+                        for c in query.selected_columns
+                    ]
+                )
+
             limit = batch_rows.get(table.name.lower())
             if limit and incremental is not None:
                 # Le lot s'arrête AVANT la valeur de curseur de la N-ième ligne
@@ -425,6 +441,11 @@ def run_pipeline():
                 cutoff_query = (
                     query.with_only_columns(col).order_by(col).offset(limit).limit(1)
                 )
+                # Les lignes à égalité avec start_value (relues par le `>=` de dlt,
+                # déjà chargées) ne doivent pas compter dans l'offset : sinon le lot
+                # cale dès que deux valeurs consécutives dépassent N lignes.
+                if incremental.start_value is not None:
+                    cutoff_query = cutoff_query.where(col > incremental.start_value)
                 with engine.connect() as conn:
                     cutoff = conn.execute(cutoff_query).scalar()
                 logging.info(
