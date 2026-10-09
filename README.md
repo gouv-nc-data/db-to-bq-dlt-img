@@ -1,6 +1,6 @@
 # db-to-bq-dlt-img
 
-Cette image Docker permet de transférer des données depuis une base de données PostgreSQL ou Oracle vers BigQuery en utilisant [dlt](https://dlthub.com/).
+Cette image Docker permet de transférer des données depuis une base de données PostgreSQL, Oracle ou MySQL vers BigQuery en utilisant [dlt](https://dlthub.com/).
 
 ## Configuration
 
