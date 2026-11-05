@@ -46,7 +46,7 @@ Read order matters in `main.py` — logging is configured first (before any GCP 
 
 **State reset gotcha** (commented in `main.py` near line 117): to fully reset dlt, drop the *entire* BigQuery dataset. Never delete only `_dlt_pipeline_state` / `_dlt_loads` — dlt won't recreate them and will crash.
 
-**Connection pool** sizing is env-driven (`DB_POOL_SIZE` etc.). Rule of thumb: `DB_POOL_SIZE >= EXTRACT__MAX_PARALLEL_ITEMS` with headroom for reflection, or you hit `QueuePool limit reached` on wide databases.
+**Extraction mode & connection pool.** `EXTRACT__NEXT_ITEM_MODE` defaults to `fifo` (set via `os.environ.setdefault`). dlt's own default, `round_robin`, advances every table generator in turn on a single thread, so each table holds its connection + open cursor until exhausted (~1 connection per table, no throughput gain). `fifo` reads one table at a time → 1 connection. The pool (`DB_POOL_SIZE` 5, `DB_POOL_MAX_OVERFLOW` 0) is a hard cap because the Oracle and PostgreSQL instances are shared by every job. `EXTRACT__WORKERS` / `EXTRACT__MAX_PARALLEL_ITEMS` only affect parallelized resources, which this image does not use. Never raise the pool to silence `QueuePool limit reached`: check the extraction mode first.
 
 ## Conventions
 
