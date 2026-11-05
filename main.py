@@ -157,6 +157,14 @@ os.environ["NORMALIZE__START_METHOD"] = os.getenv("NORMALIZE_START_METHOD", "spa
 os.environ["SOURCES__SQL_DATABASE__ARROW_CONCAT_PROMOTE_OPTIONS"] = "full"
 logging.info("Promotion de schéma Arrow configurée sur 'full'.")
 
+# Extraction table par table. Le défaut dlt (round_robin) avance tous les générateurs de
+# tables à tour de rôle dans un seul thread : chaque table garde sa connexion et son curseur
+# ouverts jusqu'à sa fin, soit ~1 connexion par table, pour un débit identique (une seule
+# lecture active à la fois). Mesuré sur aviva/iceo (Oracle) et spnc/scott2 (PG) :
+# 1 connexion au lieu de ~1 par table, et des runs 30 à 45 % plus courts.
+# Surchargeable par EXTRACT__NEXT_ITEM_MODE=round_robin.
+os.environ.setdefault("EXTRACT__NEXT_ITEM_MODE", "fifo")
+
 # Mode Thick Oracle (requis pour les versions < 12.1 ou les types complexes)
 if os.getenv("ENABLE_ORACLE_THICK_MODE", "").lower() == "true":
     lib_dir = os.getenv("ORACLE_IC_PATH")
@@ -338,11 +346,12 @@ def run_pipeline():
         )
 
         # Création de l'engine SQLAlchemy pour l'inspection et dlt.
-        # Pool configurable via variables d'env : à augmenter pour les bases avec
-        # beaucoup de tables (réflexion + extraction parallèle saturent vite un petit pool).
-        # Règle : DB_POOL_SIZE >= EXTRACT__MAX_PARALLEL_ITEMS (avec marge pour la réflexion).
-        pool_size = int(os.getenv("DB_POOL_SIZE", "20"))
-        max_overflow = int(os.getenv("DB_POOL_MAX_OVERFLOW", "30"))
+        # Pool volontairement petit et sans débordement : en extraction fifo, une seule
+        # table est lue à la fois (+ réflexion / commentaires / requête de borne des lots).
+        # Il sert de plafond dur : les instances Oracle et PG sont partagées par tous les jobs.
+        # Ne l'augmenter que si EXTRACT__NEXT_ITEM_MODE=round_robin (≈ 1 connexion par table).
+        pool_size = int(os.getenv("DB_POOL_SIZE", "5"))
+        max_overflow = int(os.getenv("DB_POOL_MAX_OVERFLOW", "0"))
         pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "60"))
         pool_recycle = int(os.getenv("DB_POOL_RECYCLE", "3600"))
         logging.info(

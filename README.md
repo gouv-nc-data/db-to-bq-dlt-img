@@ -165,8 +165,9 @@ Les commentaires de colonnes de la base source sont automatiquement copiés vers
 | `ORACLE_IC_PATH` | Chemin vers l'Instant Client Oracle (si requis et non dans le PATH). | (vide) |
 | `DROP_PENDING_PACKAGES` | Si `true`, supprime les pending packages DLT au démarrage (utile si le state est persisté via PVC et qu'un run précédent a crashé entre extract et load). À ne mettre que ponctuellement. | `false` |
 | `LOG_LEVEL` | Niveau de log (`DEBUG`, `INFO`, `WARNING`, `ERROR`). | `INFO` |
-| `DB_POOL_SIZE` | Taille du pool SQLAlchemy (connexions maintenues). | `20` |
-| `DB_POOL_MAX_OVERFLOW` | Connexions temporaires autorisées au-delà de `DB_POOL_SIZE`. | `30` |
+| `EXTRACT__NEXT_ITEM_MODE` | Ordre d'extraction des tables par dlt : `fifo` (une table après l'autre, 1 connexion) ou `round_robin` (toutes les tables entrelacées, ~1 connexion par table). | `fifo` |
+| `DB_POOL_SIZE` | Taille du pool SQLAlchemy (connexions maintenues). | `5` |
+| `DB_POOL_MAX_OVERFLOW` | Connexions temporaires autorisées au-delà de `DB_POOL_SIZE`. | `0` |
 | `DB_POOL_TIMEOUT` | Temps d'attente max (s) pour obtenir une connexion du pool. | `60` |
 | `DB_POOL_RECYCLE` | Délai (s) avant recyclage d'une connexion (évite les timeouts Oracle/PG). | `3600` |
 
@@ -174,7 +175,9 @@ Les commentaires de colonnes de la base source sont automatiquement copiés vers
 > **`DROP_PENDING_PACKAGES`** n'est utile que si le répertoire `~/.dlt` est persisté entre les runs (volume monté). Dans un Job Kubernetes éphémère sans PVC, les pending packages disparaissent avec le pod, l'option est sans effet pratique.
 
 > [!TIP]
-> **Pool de connexions et erreur `QueuePool limit reached`** : par défaut, le pool tient ~50 connexions (`DB_POOL_SIZE` + `DB_POOL_MAX_OVERFLOW`). Avec une base à plusieurs centaines de tables, la réflexion du schéma + l'extraction parallèle (`EXTRACT__WORKERS`, `EXTRACT__MAX_PARALLEL_ITEMS`) peuvent saturer le pool. Augmenter `DB_POOL_SIZE`/`DB_POOL_MAX_OVERFLOW` (et la limite `SESSIONS`/`PROCESSES` côté serveur si besoin), ou réduire `EXTRACT__MAX_PARALLEL_ITEMS` à une valeur ≤ `DB_POOL_SIZE`.
+> **Connexions à la base** : les instances Oracle et PostgreSQL sont partagées par tous les jobs (limite `PROCESSES` / `max_connections` commune). En mode `fifo` (défaut), dlt lit une table à la fois : le job tient **1 connexion**, plus brièvement 1 ou 2 pour la réflexion. Inutile de régler `EXTRACT__WORKERS` / `EXTRACT__MAX_PARALLEL_ITEMS` : ils ne concernent que les ressources parallélisées, que cette image n'utilise pas.
+>
+> En `round_robin` (défaut de dlt, avant la v0.7.0), dlt avance tous les générateurs de tables à tour de rôle dans un seul thread : chaque table garde sa connexion ouverte jusqu'à sa fin, soit ~1 connexion par table, **sans gain de débit** (une seule lecture active à la fois). C'est ce qui provoquait `QueuePool limit reached` et, côté serveur, `ORA-00020 maximum number of processes exceeded`. Ne pas gonfler le pool pour contourner l'erreur : vérifier le mode d'extraction.
 
 ## Format des URL de connexion
 
